@@ -1,0 +1,121 @@
+project:
+  name: fraud-detection
+  version: "1.0.0"
+  description: "Fraud detection streaming pipeline"
+
+runtime:
+  kafka:
+    bootstrap_servers: localhost:9092
+
+  schema_registry:
+    url: http://localhost:8081
+
+  flink:
+    default: local-flink
+    clusters:
+      local-flink:
+        type: rest
+        rest_url: http://localhost:8082
+
+  connect:
+    default: local-connect
+    clusters:
+      local-connect:
+        rest_url: http://localhost:8083
+
+defaults:
+  models:
+    cluster: local-kafka
+
+rules:
+  topics:
+    min_partitions: 1
+    min_replication_factor: 1
+  models:
+    require_description: false
+
+sources:
+  - name: card_payments_raw
+    description: "Raw payment events from payments-api"
+    topic: payments.raw.v1
+    owner: team-payments
+    columns:
+      - name: card_number
+        classification: highly_sensitive
+      - name: customer_email
+        classification: sensitive
+
+  - name: customers_cdc
+    description: "CDC from CRM database"
+    topic: crm.customers.cdc
+    owner: team-crm
+
+models:
+  - name: card_payments_clean
+    description: "Cleaned payment events"
+    materialized: topic
+    topic:
+      partitions: 6
+      replication_factor: 1
+    key: payment_id
+    sql: |
+      SELECT
+        payment_id,
+        customer_id,
+        amount_cents,
+        currency,
+        status,
+        event_time
+      FROM {{ source("card_payments_raw") }}
+      WHERE status IN ('AUTHORIZED', 'CAPTURED')
+
+  - name: customer_balance_5m
+    description: "Customer balance aggregated over 5-minute windows"
+    materialized: flink
+    key: customer_id
+    sql: |
+      SELECT
+        customer_id,
+        TUMBLE_START(event_time, INTERVAL '5' MINUTE) AS window_start,
+        SUM(amount_cents) AS total_amount_cents
+      FROM {{ ref("card_payments_clean") }}
+      GROUP BY
+        customer_id,
+        TUMBLE(event_time, INTERVAL '5' MINUTE)
+
+tests:
+  - name: payments_clean_schema
+    model: card_payments_clean
+    type: schema
+    assertions:
+      - not_null:
+          columns: [payment_id, customer_id]
+      - accepted_types:
+          payment_id: string
+          amount_cents: long
+
+  - name: payments_clean_sample
+    model: card_payments_clean
+    type: sample
+    sample_size: 100
+    assertions:
+      - accepted_values:
+          column: status
+          values: ["AUTHORIZED", "CAPTURED"]
+
+exposures:
+  - name: payments_api
+    type: application
+    role: producer
+    description: "Java service that produces payment events"
+    owner: team-payments
+    produces:
+      - source: card_payments_raw
+
+  - name: fraud_scoring_service
+    type: application
+    role: consumer
+    description: "Python ML service for fraud scoring"
+    owner: team-fraud
+    consumes:
+      - ref: customer_balance_5m

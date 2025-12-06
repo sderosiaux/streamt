@@ -1,0 +1,367 @@
+"""Tests for the validator module."""
+
+import tempfile
+from pathlib import Path
+
+import pytest
+import yaml
+
+from streamt.core.parser import ProjectParser
+from streamt.core.validator import ProjectValidator
+
+
+class TestProjectValidator:
+    """Tests for ProjectValidator."""
+
+    def _create_project(self, tmpdir: str, config: dict) -> "StreamtProject":
+        """Helper to create and parse a project."""
+        project_path = Path(tmpdir)
+        with open(project_path / "stream_project.yml", "w") as f:
+            yaml.dump(config, f)
+        parser = ProjectParser(project_path)
+        return parser.parse()
+
+    def test_duplicate_source_names(self):
+        """TC-ERR-008: Duplicate source names should be detected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "sources": [
+                    {"name": "payments_raw", "topic": "t1"},
+                    {"name": "payments_raw", "topic": "t2"},  # Duplicate
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("DUPLICATE_SOURCE" in e.code for e in result.errors)
+
+    def test_duplicate_model_names(self):
+        """TC-ERR-008: Duplicate model names should be detected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "models": [
+                    {"name": "payments_clean", "materialized": "topic"},
+                    {"name": "payments_clean", "materialized": "topic"},  # Duplicate
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("DUPLICATE_MODEL" in e.code for e in result.errors)
+
+    def test_source_not_found(self):
+        """TC-VAL-007: Reference to non-existent source should fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "models": [
+                    {
+                        "name": "payments_clean",
+                        "materialized": "topic",
+                        "sql": 'SELECT * FROM {{ source("nonexistent") }}',
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("SOURCE_NOT_FOUND" in e.code for e in result.errors)
+
+    def test_model_not_found(self):
+        """TC-VAL-008: Reference to non-existent model should fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "models": [
+                    {
+                        "name": "enriched",
+                        "materialized": "topic",
+                        "sql": 'SELECT * FROM {{ ref("payments_clean") }}',
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("MODEL_NOT_FOUND" in e.code for e in result.errors)
+
+    def test_cycle_detection(self):
+        """TC-VAL-009: Cycles in DAG should be detected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "models": [
+                    {
+                        "name": "model_a",
+                        "materialized": "topic",
+                        "sql": 'SELECT * FROM {{ ref("model_b") }}',
+                    },
+                    {
+                        "name": "model_b",
+                        "materialized": "topic",
+                        "sql": 'SELECT * FROM {{ ref("model_a") }}',
+                    },
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("CYCLE_DETECTED" in e.code for e in result.errors)
+
+    def test_virtual_topic_without_gateway(self):
+        """TC-COMP-005: virtual_topic without Gateway should fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "sources": [{"name": "payments_raw", "topic": "t1"}],
+                "models": [
+                    {
+                        "name": "payments_filtered",
+                        "materialized": "virtual_topic",
+                        "sql": 'SELECT * FROM {{ source("payments_raw") }}',
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("GATEWAY_REQUIRED" in e.code for e in result.errors)
+
+    def test_continuous_test_without_flink(self):
+        """TC-TEST-006: Continuous test without Flink should fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "sources": [{"name": "payments_raw", "topic": "t1"}],
+                "models": [
+                    {
+                        "name": "payments_clean",
+                        "materialized": "topic",
+                        "sql": 'SELECT * FROM {{ source("payments_raw") }}',
+                    }
+                ],
+                "tests": [
+                    {
+                        "name": "quality_test",
+                        "model": "payments_clean",
+                        "type": "continuous",
+                        "assertions": [{"unique_key": {"key": "id", "window": "15 minutes"}}],
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("CONTINUOUS_TEST_REQUIRES_FLINK" in e.code for e in result.errors)
+
+    def test_jinja_syntax_error(self):
+        """TC-ERR-009: Invalid Jinja syntax should be detected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "sources": [{"name": "payments_raw", "topic": "t1"}],
+                "models": [
+                    {
+                        "name": "broken",
+                        "materialized": "topic",
+                        "sql": 'SELECT * FROM {{ source("payments_raw" }}',  # Missing )
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("JINJA_SYNTAX_ERROR" in e.code for e in result.errors)
+
+    def test_unused_from_warning(self):
+        """TC-VAL-006: Declared but unused from should warn."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "sources": [
+                    {"name": "payments_raw", "topic": "t1"},
+                    {"name": "customers_raw", "topic": "t2"},
+                ],
+                "models": [
+                    {
+                        "name": "payments_clean",
+                        "materialized": "topic",
+                        "from": [
+                            {"source": "payments_raw"},
+                            {"source": "customers_raw"},  # Declared but not used
+                        ],
+                        "sql": 'SELECT * FROM {{ source("payments_raw") }}',
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert result.is_valid  # Should still be valid
+            assert len(result.warnings) > 0
+            assert any("UNUSED_FROM" in w.code for w in result.warnings)
+
+    def test_rule_min_partitions_violation(self):
+        """TC-RULE-001: Violation of min_partitions rule should fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "rules": {"topics": {"min_partitions": 6}},
+                "models": [
+                    {
+                        "name": "payments_clean",
+                        "materialized": "topic",
+                        "topic": {"partitions": 3},  # Less than 6
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("RULE_MIN_PARTITIONS" in e.code for e in result.errors)
+
+    def test_rule_require_description_violation(self):
+        """TC-RULE-003: Violation of require_description rule should fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "rules": {"models": {"require_description": True}},
+                "models": [
+                    {
+                        "name": "payments_clean",
+                        "materialized": "topic",
+                        # No description
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("RULE_REQUIRE_DESCRIPTION" in e.code for e in result.errors)
+
+    def test_rule_require_tests_violation(self):
+        """TC-RULE-004: Violation of require_tests rule should fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "rules": {"models": {"require_tests": True}},
+                "models": [
+                    {
+                        "name": "payments_clean",
+                        "materialized": "topic",
+                    }
+                ],
+                # No tests defined
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("RULE_REQUIRE_TESTS" in e.code for e in result.errors)
+
+    def test_valid_project_with_rules(self):
+        """TC-RULE-006: Project respecting all rules should pass."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "rules": {
+                    "topics": {"min_partitions": 3},
+                    "models": {"require_description": True},
+                },
+                "sources": [{"name": "payments_raw", "topic": "t1"}],
+                "models": [
+                    {
+                        "name": "payments_clean",
+                        "description": "Cleaned payments",
+                        "materialized": "topic",
+                        "topic": {"partitions": 6},
+                        "sql": 'SELECT * FROM {{ source("payments_raw") }}',
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert result.is_valid
+
+    def test_exposure_model_not_found(self):
+        """Exposure referencing unknown model should fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "exposures": [
+                    {
+                        "name": "app",
+                        "type": "application",
+                        "role": "consumer",
+                        "consumes": [{"ref": "nonexistent_model"}],
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("EXPOSURE_MODEL_NOT_FOUND" in e.code for e in result.errors)
+
+    def test_test_model_not_found(self):
+        """Test referencing unknown model should fail."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test"},
+                "runtime": {"kafka": {"bootstrap_servers": "localhost:9092"}},
+                "tests": [
+                    {
+                        "name": "test1",
+                        "model": "nonexistent",
+                        "type": "schema",
+                        "assertions": [],
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            validator = ProjectValidator(project)
+            result = validator.validate()
+
+            assert not result.is_valid
+            assert any("TEST_MODEL_NOT_FOUND" in e.code for e in result.errors)

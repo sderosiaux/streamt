@@ -1,0 +1,6 @@
+project:
+  name: minimal-project
+
+runtime:
+  kafka:
+    bootstrap_servers: localhost:9092

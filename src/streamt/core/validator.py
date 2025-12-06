@@ -1,0 +1,544 @@
+"""Validator for streamt projects."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Optional
+
+from streamt.core.models import (
+    Classification,
+    MaterializedType,
+    Model,
+    ModelRules,
+    SecurityRules,
+    Source,
+    SourceRules,
+    StreamtProject,
+    TopicRules,
+)
+from streamt.core.parser import ProjectParser
+
+
+class ValidationLevel(str, Enum):
+    """Validation message level."""
+
+    ERROR = "error"
+    WARNING = "warning"
+
+
+@dataclass
+class ValidationMessage:
+    """A validation message."""
+
+    level: ValidationLevel
+    code: str
+    message: str
+    location: Optional[str] = None
+
+
+@dataclass
+class ValidationResult:
+    """Result of validation."""
+
+    messages: list[ValidationMessage] = field(default_factory=list)
+
+    @property
+    def is_valid(self) -> bool:
+        """Check if validation passed (no errors)."""
+        return not any(m.level == ValidationLevel.ERROR for m in self.messages)
+
+    @property
+    def errors(self) -> list[ValidationMessage]:
+        """Get error messages."""
+        return [m for m in self.messages if m.level == ValidationLevel.ERROR]
+
+    @property
+    def warnings(self) -> list[ValidationMessage]:
+        """Get warning messages."""
+        return [m for m in self.messages if m.level == ValidationLevel.WARNING]
+
+    def add_error(self, code: str, message: str, location: Optional[str] = None) -> None:
+        """Add an error message."""
+        self.messages.append(ValidationMessage(ValidationLevel.ERROR, code, message, location))
+
+    def add_warning(self, code: str, message: str, location: Optional[str] = None) -> None:
+        """Add a warning message."""
+        self.messages.append(ValidationMessage(ValidationLevel.WARNING, code, message, location))
+
+
+class ProjectValidator:
+    """Validator for streamt projects."""
+
+    def __init__(self, project: StreamtProject) -> None:
+        """Initialize validator with project."""
+        self.project = project
+        self.parser = ProjectParser(project.project_path) if project.project_path else None
+        self.result = ValidationResult()
+
+        # Build lookup maps
+        self.source_names = {s.name for s in project.sources}
+        self.model_names = {m.name for m in project.models}
+        self.test_names = {t.name for t in project.tests}
+        self.exposure_names = {e.name for e in project.exposures}
+
+    def validate(self) -> ValidationResult:
+        """Run all validations."""
+        self._validate_duplicates()
+        self._validate_sources()
+        self._validate_models()
+        self._validate_tests()
+        self._validate_exposures()
+        self._validate_dag()
+        self._validate_rules()
+        return self.result
+
+    def _validate_duplicates(self) -> None:
+        """Check for duplicate names."""
+        # Check source duplicates
+        seen_sources: set[str] = set()
+        for source in self.project.sources:
+            if source.name in seen_sources:
+                self.result.add_error(
+                    "DUPLICATE_SOURCE",
+                    f"Duplicate source name '{source.name}'",
+                )
+            seen_sources.add(source.name)
+
+        # Check model duplicates
+        seen_models: set[str] = set()
+        for model in self.project.models:
+            if model.name in seen_models:
+                self.result.add_error(
+                    "DUPLICATE_MODEL",
+                    f"Duplicate model name '{model.name}'",
+                )
+            seen_models.add(model.name)
+
+        # Check test duplicates
+        seen_tests: set[str] = set()
+        for test in self.project.tests:
+            if test.name in seen_tests:
+                self.result.add_error(
+                    "DUPLICATE_TEST",
+                    f"Duplicate test name '{test.name}'",
+                )
+            seen_tests.add(test.name)
+
+        # Check exposure duplicates
+        seen_exposures: set[str] = set()
+        for exposure in self.project.exposures:
+            if exposure.name in seen_exposures:
+                self.result.add_error(
+                    "DUPLICATE_EXPOSURE",
+                    f"Duplicate exposure name '{exposure.name}'",
+                )
+            seen_exposures.add(exposure.name)
+
+    def _validate_sources(self) -> None:
+        """Validate source declarations."""
+        for source in self.project.sources:
+            # Topic is required (already handled by Pydantic)
+            if not source.topic:
+                self.result.add_error(
+                    "MISSING_TOPIC",
+                    f"Source '{source.name}' missing required field 'topic'",
+                )
+
+    def _validate_models(self) -> None:
+        """Validate model declarations."""
+        for model in self.project.models:
+            self._validate_model(model)
+
+    def _validate_model(self, model: Model) -> None:
+        """Validate a single model."""
+        # Check virtual_topic requires gateway
+        if model.materialized == MaterializedType.VIRTUAL_TOPIC:
+            if not (self.project.runtime.conduktor and self.project.runtime.conduktor.gateway):
+                self.result.add_error(
+                    "GATEWAY_REQUIRED",
+                    f"Model '{model.name}' uses 'virtual_topic' but no Gateway configured",
+                )
+
+        # Check sink requires sink config
+        if model.materialized == MaterializedType.SINK:
+            if not model.sink:
+                self.result.add_error(
+                    "MISSING_SINK_CONFIG",
+                    f"Model '{model.name}' uses 'sink' but no sink configuration",
+                )
+
+        # Check flink requires flink runtime
+        if model.materialized == MaterializedType.FLINK:
+            if not self.project.runtime.flink:
+                self.result.add_error(
+                    "FLINK_REQUIRED",
+                    f"Model '{model.name}' uses 'flink' but no Flink configured",
+                )
+
+        # Validate SQL and extract dependencies
+        if model.sql and self.parser:
+            # Validate Jinja syntax
+            is_valid, error = self.parser.validate_jinja_sql(model.sql)
+            if not is_valid:
+                self.result.add_error(
+                    "JINJA_SYNTAX_ERROR",
+                    f"Jinja syntax error in model '{model.name}': {error}",
+                )
+                return
+
+            # Extract and validate references
+            sources, refs = self.parser.extract_refs_from_sql(model.sql)
+
+            for source_name in sources:
+                if source_name not in self.source_names:
+                    self.result.add_error(
+                        "SOURCE_NOT_FOUND",
+                        f"Source '{source_name}' not found. Referenced in model '{model.name}'",
+                    )
+
+            for ref_name in refs:
+                if ref_name not in self.model_names:
+                    self.result.add_error(
+                        "MODEL_NOT_FOUND",
+                        f"Model '{ref_name}' not found. Referenced in model '{model.name}'",
+                    )
+
+            # Check from vs SQL consistency
+            if model.from_:
+                declared_sources = {f.source for f in model.from_ if f.source}
+                declared_refs = {f.ref for f in model.from_ if f.ref}
+
+                # Warn about declared but unused
+                for declared in declared_sources - set(sources):
+                    self.result.add_warning(
+                        "UNUSED_FROM_SOURCE",
+                        f"Source '{declared}' declared in 'from' but not used in SQL",
+                        f"model '{model.name}'",
+                    )
+
+                for declared in declared_refs - set(refs):
+                    self.result.add_warning(
+                        "UNUSED_FROM_REF",
+                        f"Model '{declared}' declared in 'from' but not used in SQL",
+                        f"model '{model.name}'",
+                    )
+
+        # Validate access control
+        if model.access.value == "private" and model.group:
+            # Check references from other models
+            for other_model in self.project.models:
+                if other_model.name == model.name:
+                    continue
+
+                if other_model.sql and self.parser:
+                    _, refs = self.parser.extract_refs_from_sql(other_model.sql)
+                    if model.name in refs:
+                        # Check if other model is in same group
+                        if other_model.group != model.group:
+                            self.result.add_error(
+                                "ACCESS_DENIED",
+                                f"Model '{other_model.name}' cannot reference "
+                                f"'{model.name}' (restricted to group '{model.group}')",
+                            )
+
+    def _validate_tests(self) -> None:
+        """Validate test declarations."""
+        for test in self.project.tests:
+            # Check model exists
+            if test.model not in self.model_names and test.model not in self.source_names:
+                self.result.add_error(
+                    "TEST_MODEL_NOT_FOUND",
+                    f"Test '{test.name}' references unknown model/source '{test.model}'",
+                )
+
+            # Check continuous tests require Flink
+            if test.type.value == "continuous":
+                if not self.project.runtime.flink:
+                    self.result.add_error(
+                        "CONTINUOUS_TEST_REQUIRES_FLINK",
+                        f"Continuous test '{test.name}' requires Flink. Configure runtime.flink",
+                    )
+
+            # Validate DLQ references
+            if test.on_failure:
+                for action in test.on_failure.actions:
+                    if "dlq" in action:
+                        dlq_model = action["dlq"].get("model")
+                        if dlq_model and dlq_model not in self.model_names:
+                            self.result.add_error(
+                                "DLQ_MODEL_NOT_FOUND",
+                                f"DLQ model '{dlq_model}' not found in test '{test.name}'",
+                            )
+
+    def _validate_exposures(self) -> None:
+        """Validate exposure declarations."""
+        for exposure in self.project.exposures:
+            # Validate produces references
+            for ref in exposure.produces:
+                if ref.source and ref.source not in self.source_names:
+                    self.result.add_error(
+                        "EXPOSURE_SOURCE_NOT_FOUND",
+                        f"Exposure '{exposure.name}' produces unknown source '{ref.source}'",
+                    )
+
+            # Validate consumes references
+            for ref in exposure.consumes:
+                if ref.ref and ref.ref not in self.model_names:
+                    self.result.add_error(
+                        "EXPOSURE_MODEL_NOT_FOUND",
+                        f"Exposure '{exposure.name}' consumes unknown model '{ref.ref}'",
+                    )
+
+            # Validate depends_on references
+            for ref in exposure.depends_on:
+                if ref.ref and ref.ref not in self.model_names:
+                    self.result.add_error(
+                        "EXPOSURE_DEPENDENCY_NOT_FOUND",
+                        f"Exposure '{exposure.name}' depends on unknown model '{ref.ref}'",
+                    )
+                if ref.source and ref.source not in self.source_names:
+                    self.result.add_error(
+                        "EXPOSURE_DEPENDENCY_NOT_FOUND",
+                        f"Exposure '{exposure.name}' depends on unknown source '{ref.source}'",
+                    )
+
+    def _validate_dag(self) -> None:
+        """Validate DAG has no cycles."""
+        # Build adjacency list
+        graph: dict[str, set[str]] = {m.name: set() for m in self.project.models}
+
+        for model in self.project.models:
+            if model.sql and self.parser:
+                _, refs = self.parser.extract_refs_from_sql(model.sql)
+                for ref in refs:
+                    if ref in graph:
+                        graph[model.name].add(ref)
+
+        # Detect cycles using DFS - colors: 0=white (unvisited), 1=gray (visiting), 2=black (done)
+        white, gray, black = 0, 1, 2
+        color = {node: white for node in graph}
+        path: list[str] = []
+
+        def dfs(node: str) -> Optional[list[str]]:
+            color[node] = gray
+            path.append(node)
+
+            for neighbor in graph[node]:
+                if color[neighbor] == gray:
+                    # Found cycle
+                    cycle_start = path.index(neighbor)
+                    return path[cycle_start:] + [neighbor]
+                elif color[neighbor] == white:
+                    cycle = dfs(neighbor)
+                    if cycle:
+                        return cycle
+
+            path.pop()
+            color[node] = black
+            return None
+
+        for node in graph:
+            if color[node] == white:
+                cycle = dfs(node)
+                if cycle:
+                    self.result.add_error(
+                        "CYCLE_DETECTED",
+                        f"Cycle detected in DAG: {' -> '.join(cycle)}",
+                    )
+                    return
+
+    def _validate_rules(self) -> None:
+        """Validate governance rules."""
+        rules = self.project.rules
+        if not rules:
+            return
+
+        # Topic rules
+        if rules.topics:
+            for model in self.project.models:
+                if model.materialized in [
+                    MaterializedType.TOPIC,
+                    MaterializedType.FLINK,
+                ]:
+                    self._validate_topic_rules(model, rules.topics)
+
+        # Model rules
+        if rules.models:
+            for model in self.project.models:
+                self._validate_model_rules(model, rules.models)
+
+        # Source rules
+        if rules.sources:
+            for source in self.project.sources:
+                self._validate_source_rules(source, rules.sources)
+
+        # Security rules
+        if rules.security:
+            self._validate_security_rules(rules.security)
+
+    def _validate_topic_rules(self, model: Model, rules: TopicRules) -> None:
+        """Validate topic rules for a model."""
+
+        topic_config = model.topic
+
+        # Check min partitions
+        if rules.min_partitions is not None:
+            partitions = topic_config.partitions if topic_config else None
+            if partitions is not None and partitions < rules.min_partitions:
+                self.result.add_error(
+                    "RULE_MIN_PARTITIONS",
+                    f"Model '{model.name}' violates rule 'topics.min_partitions': "
+                    f"expected >= {rules.min_partitions}, got {partitions}",
+                )
+
+        # Check max partitions
+        if rules.max_partitions is not None:
+            partitions = topic_config.partitions if topic_config else None
+            if partitions is not None and partitions > rules.max_partitions:
+                self.result.add_error(
+                    "RULE_MAX_PARTITIONS",
+                    f"Model '{model.name}' violates rule 'topics.max_partitions': "
+                    f"expected <= {rules.max_partitions}, got {partitions}",
+                )
+
+        # Check min replication factor
+        if rules.min_replication_factor is not None:
+            rf = topic_config.replication_factor if topic_config else None
+            if rf is not None and rf < rules.min_replication_factor:
+                self.result.add_error(
+                    "RULE_MIN_REPLICATION",
+                    f"Model '{model.name}' violates rule 'topics.min_replication_factor': "
+                    f"expected >= {rules.min_replication_factor}, got {rf}",
+                )
+
+        # Check naming pattern
+        if rules.naming_pattern:
+            topic_name = topic_config.name if topic_config and topic_config.name else model.name
+            if not re.match(rules.naming_pattern, topic_name):
+                self.result.add_error(
+                    "RULE_NAMING_PATTERN",
+                    f"Topic name '{topic_name}' does not match pattern '{rules.naming_pattern}'",
+                )
+
+        # Check forbidden prefixes
+        if rules.forbidden_prefixes:
+            topic_name = topic_config.name if topic_config and topic_config.name else model.name
+            for prefix in rules.forbidden_prefixes:
+                if topic_name.startswith(prefix):
+                    self.result.add_error(
+                        "RULE_FORBIDDEN_PREFIX",
+                        f"Topic name '{topic_name}' has forbidden prefix '{prefix}'",
+                    )
+
+    def _validate_model_rules(self, model: Model, rules: ModelRules) -> None:
+        """Validate model rules."""
+
+        # Check require_description
+        if rules.require_description and not model.description:
+            self.result.add_error(
+                "RULE_REQUIRE_DESCRIPTION",
+                f"Model '{model.name}' missing required field 'description'",
+            )
+
+        # Check require_owner
+        if rules.require_owner and not model.owner:
+            self.result.add_error(
+                "RULE_REQUIRE_OWNER",
+                f"Model '{model.name}' missing required field 'owner'",
+            )
+
+        # Check require_tests
+        if rules.require_tests:
+            has_test = any(t.model == model.name for t in self.project.tests)
+            if not has_test:
+                self.result.add_error(
+                    "RULE_REQUIRE_TESTS",
+                    f"Model '{model.name}' has no tests defined",
+                )
+
+        # Check max_dependencies
+        if rules.max_dependencies is not None and self.parser:
+            if model.sql:
+                sources, refs = self.parser.extract_refs_from_sql(model.sql)
+                dep_count = len(sources) + len(refs)
+                if dep_count > rules.max_dependencies:
+                    self.result.add_error(
+                        "RULE_MAX_DEPENDENCIES",
+                        f"Model '{model.name}' has {dep_count} dependencies, "
+                        f"max allowed is {rules.max_dependencies}",
+                    )
+
+    def _validate_source_rules(self, source: Source, rules: SourceRules) -> None:
+        """Validate source rules."""
+
+        # Check require_schema
+        if rules.require_schema and not source.schema_:
+            self.result.add_error(
+                "RULE_REQUIRE_SCHEMA",
+                f"Source '{source.name}' missing required field 'schema'",
+            )
+
+        # Check require_freshness
+        if rules.require_freshness and not source.freshness:
+            self.result.add_error(
+                "RULE_REQUIRE_FRESHNESS",
+                f"Source '{source.name}' missing required field 'freshness'",
+            )
+
+    def _validate_security_rules(self, rules: SecurityRules) -> None:
+        """Validate security rules."""
+
+        sensitive_columns: dict[str, list[str]] = {}  # source/model -> columns
+
+        # Collect sensitive columns from sources
+        for source in self.project.sources:
+            for col in source.columns:
+                if col.classification in [
+                    Classification.SENSITIVE,
+                    Classification.HIGHLY_SENSITIVE,
+                ]:
+                    if source.name not in sensitive_columns:
+                        sensitive_columns[source.name] = []
+                    sensitive_columns[source.name].append(col.name)
+
+        # Collect sensitive columns from models
+        for model in self.project.models:
+            if model.security and model.security.classification:
+                for col, classification in model.security.classification.items():
+                    if classification in [
+                        Classification.SENSITIVE,
+                        Classification.HIGHLY_SENSITIVE,
+                    ]:
+                        if model.name not in sensitive_columns:
+                            sensitive_columns[model.name] = []
+                        sensitive_columns[model.name].append(col)
+
+        # Check require_classification (sources must have all columns classified)
+        if rules.require_classification:
+            for source in self.project.sources:
+                # This rule means all columns in sources should have classification
+                # For simplicity, we skip this for now as it requires full schema info
+                pass
+
+        # Check sensitive_columns_require_masking
+        if rules.sensitive_columns_require_masking:
+            for entity_name, columns in sensitive_columns.items():
+                for col in columns:
+                    # Check if any model has masking for this column
+                    has_masking = False
+                    for model in self.project.models:
+                        if model.security and model.security.policies:
+                            for policy in model.security.policies:
+                                if "mask" in policy:
+                                    if policy["mask"].get("column") == col:
+                                        has_masking = True
+                                        break
+
+                    if not has_masking:
+                        self.result.add_error(
+                            "RULE_SENSITIVE_REQUIRES_MASKING",
+                            f"Column '{col}' in '{entity_name}' classified as sensitive "
+                            f"has no masking policy",
+                        )

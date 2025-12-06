@@ -1,0 +1,86 @@
+project:
+  name: payments-pipeline
+  version: "1.0.0"
+  description: "Payments processing pipeline example"
+
+runtime:
+  kafka:
+    bootstrap_servers: localhost:9092
+  schema_registry:
+    url: http://localhost:8081
+  flink:
+    default: local
+    clusters:
+      local:
+        type: rest
+        rest_url: http://localhost:8082
+  connect:
+    default: local
+    clusters:
+      local:
+        rest_url: http://localhost:8083
+
+rules:
+  topics:
+    min_partitions: 3
+  models:
+    require_description: true
+
+sources:
+  - name: payments_raw
+    description: "Raw payment events from external system"
+    topic: payments.raw.v1
+
+models:
+  - name: payments_clean
+    description: "Cleaned and validated payment events"
+    materialized: topic
+    topic:
+      partitions: 6
+      replication_factor: 3
+    sql: |
+      SELECT
+        payment_id,
+        customer_id,
+        amount,
+        currency,
+        status,
+        event_timestamp
+      FROM {{ source("payments_raw") }}
+      WHERE status IS NOT NULL
+
+  - name: customer_balances
+    description: "Aggregated customer balances per 5-minute window"
+    materialized: flink
+    topic:
+      partitions: 12
+    sql: |
+      SELECT
+        customer_id,
+        SUM(amount) as total_amount,
+        COUNT(*) as transaction_count,
+        TUMBLE_END(event_timestamp, INTERVAL '5' MINUTE) as window_end
+      FROM {{ ref("payments_clean") }}
+      WHERE status = 'CAPTURED'
+      GROUP BY customer_id, TUMBLE(event_timestamp, INTERVAL '5' MINUTE)
+
+tests:
+  - name: payments_schema
+    model: payments_clean
+    type: schema
+    assertions:
+      - not_null:
+          columns: [payment_id, customer_id, amount]
+      - accepted_values:
+          column: status
+          values: [PENDING, CAPTURED, FAILED, REFUNDED]
+
+exposures:
+  - name: billing_service
+    type: application
+    role: consumer
+    description: "Billing microservice consuming customer balances"
+    owner: billing-team@example.com
+    consumes:
+      - ref: customer_balances
+    consumer_group: billing-service-consumer
