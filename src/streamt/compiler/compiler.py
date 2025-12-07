@@ -14,6 +14,7 @@ from streamt.compiler.manifest import (
     FlinkJobArtifact,
     GatewayRuleArtifact,
     Manifest,
+    SchemaArtifact,
     TopicArtifact,
 )
 from streamt.core.dag import DAGBuilder
@@ -60,6 +61,7 @@ class Compiler:
         self.jinja_env = Environment(loader=BaseLoader())
 
         # Artifacts
+        self.schemas: list[SchemaArtifact] = []
         self.topics: list[TopicArtifact] = []
         self.flink_jobs: list[FlinkJobArtifact] = []
         self.connectors: list[ConnectorArtifact] = []
@@ -68,10 +70,15 @@ class Compiler:
     def compile(self, dry_run: bool = False) -> Manifest:
         """Compile the project."""
         # Clear previous artifacts
+        self.schemas = []
         self.topics = []
         self.flink_jobs = []
         self.connectors = []
         self.gateway_rules = []
+
+        # Compile schemas from sources with schema definitions
+        for source in self.project.sources:
+            self._compile_source_schema(source)
 
         # Compile models in topological order
         model_order = self.dag.get_models_only()
@@ -88,6 +95,57 @@ class Compiler:
             self._write_artifacts()
 
         return manifest
+
+    def _compile_source_schema(self, source: Source) -> None:
+        """Compile schema artifact from a source with schema definition."""
+        if not source.schema_:
+            return
+
+        # Generate subject name (topic-value is the convention)
+        subject = source.schema_.subject or f"{source.topic}-value"
+
+        # Get schema definition - either inline or reference
+        if source.schema_.definition:
+            try:
+                schema = json.loads(source.schema_.definition)
+            except json.JSONDecodeError:
+                # Assume it's already a dict-like definition
+                schema = {"type": "record", "name": source.name, "fields": []}
+        else:
+            # Generate basic schema from columns if available
+            schema = self._generate_schema_from_columns(source)
+
+        if schema:
+            schema_type = source.schema_.format or "AVRO"
+            self.schemas.append(
+                SchemaArtifact(
+                    subject=subject,
+                    schema=schema,
+                    schema_type=schema_type.upper(),
+                )
+            )
+
+    def _generate_schema_from_columns(self, source: Source) -> dict | None:
+        """Generate Avro schema from source columns."""
+        if not source.columns:
+            return None
+
+        fields = []
+        for col in source.columns:
+            # Default to string type, can be enhanced with type mapping
+            fields.append({
+                "name": col.name,
+                "type": ["null", "string"],
+                "default": None,
+                "doc": col.description or "",
+            })
+
+        return {
+            "type": "record",
+            "name": source.name.replace("-", "_").replace(".", "_"),
+            "namespace": "com.streamt",
+            "fields": fields,
+        }
 
     def _compile_model(self, model: Model) -> None:
         """Compile a single model."""
@@ -490,6 +548,7 @@ class Compiler:
             exposures=[e.model_dump() for e in self.project.exposures],
             dag=self.dag.to_dict(),
             artifacts={
+                "schemas": [s.to_dict() for s in self.schemas],
                 "topics": [t.to_dict() for t in self.topics],
                 "flink_jobs": [f.to_dict() for f in self.flink_jobs],
                 "connectors": [c.to_dict() for c in self.connectors],
@@ -500,6 +559,16 @@ class Compiler:
     def _write_artifacts(self) -> None:
         """Write all artifacts to output directory."""
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Write schemas
+        if self.schemas:
+            schemas_dir = self.output_dir / "schemas"
+            schemas_dir.mkdir(exist_ok=True)
+            for schema in self.schemas:
+                # Write schema file
+                path = schemas_dir / f"{schema.subject}.json"
+                with open(path, "w") as f:
+                    json.dump(schema.to_dict(), f, indent=2)
 
         # Write topics
         topics_dir = self.output_dir / "topics"

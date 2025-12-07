@@ -169,12 +169,18 @@ def compile(project_dir: Optional[str], output: Optional[str], dry_run: bool) ->
                 console.print(f"\n[cyan]Gateway Rules ({len(artifacts['gateway_rules'])}):[/cyan]")
                 for rule in artifacts["gateway_rules"]:
                     console.print(f"  - {rule['name']}")
+
+            if artifacts.get("schemas"):
+                console.print(f"\n[cyan]Schemas ({len(artifacts['schemas'])}):[/cyan]")
+                for schema in artifacts["schemas"]:
+                    console.print(f"  - {schema['subject']} ({schema['schema_type']})")
         else:
             console.print(f"[green]Compiled to {compiler.output_dir}[/green]")
 
             table = Table(title="Generated Artifacts")
             table.add_column("Type", style="cyan")
             table.add_column("Count", style="green")
+            table.add_row("Schemas", str(len(manifest.artifacts.get("schemas", []))))
             table.add_row("Topics", str(len(manifest.artifacts.get("topics", []))))
             table.add_row("Flink Jobs", str(len(manifest.artifacts.get("flink_jobs", []))))
             table.add_row("Connectors", str(len(manifest.artifacts.get("connectors", []))))
@@ -205,6 +211,7 @@ def plan(project_dir: Optional[str]) -> None:
     from streamt.deployer.flink import FlinkDeployer
     from streamt.deployer.kafka import KafkaDeployer
     from streamt.deployer.planner import DeploymentPlanner
+    from streamt.deployer.schema_registry import SchemaRegistryDeployer
 
     project_path = get_project_path(project_dir)
 
@@ -225,9 +232,20 @@ def plan(project_dir: Optional[str]) -> None:
         manifest = compiler.compile(dry_run=True)
 
         # Create deployers
+        schema_registry_deployer = None
         kafka_deployer = None
         flink_deployer = None
         connect_deployer = None
+
+        if project.runtime.schema_registry:
+            try:
+                schema_registry_deployer = SchemaRegistryDeployer(
+                    project.runtime.schema_registry.url,
+                    username=project.runtime.schema_registry.username,
+                    password=project.runtime.schema_registry.password,
+                )
+            except Exception as e:
+                console.print(f"[yellow]Warning: Cannot connect to Schema Registry: {e}[/yellow]")
 
         try:
             kafka_deployer = KafkaDeployer(project.runtime.kafka.bootstrap_servers)
@@ -256,6 +274,7 @@ def plan(project_dir: Optional[str]) -> None:
         # Create plan
         planner = DeploymentPlanner(
             manifest,
+            schema_registry_deployer=schema_registry_deployer,
             kafka_deployer=kafka_deployer,
             flink_deployer=flink_deployer,
             connect_deployer=connect_deployer,
@@ -295,6 +314,7 @@ def apply(project_dir: Optional[str], target: Optional[str], select: Optional[st
     from streamt.deployer.flink import FlinkDeployer
     from streamt.deployer.kafka import KafkaDeployer
     from streamt.deployer.planner import DeploymentPlanner
+    from streamt.deployer.schema_registry import SchemaRegistryDeployer
 
     project_path = get_project_path(project_dir)
 
@@ -315,6 +335,14 @@ def apply(project_dir: Optional[str], target: Optional[str], select: Optional[st
         manifest = compiler.compile()
 
         # Create deployers
+        schema_registry_deployer = None
+        if project.runtime.schema_registry:
+            schema_registry_deployer = SchemaRegistryDeployer(
+                project.runtime.schema_registry.url,
+                username=project.runtime.schema_registry.username,
+                password=project.runtime.schema_registry.password,
+            )
+
         kafka_deployer = KafkaDeployer(project.runtime.kafka.bootstrap_servers)
 
         flink_deployer = None
@@ -336,6 +364,7 @@ def apply(project_dir: Optional[str], target: Optional[str], select: Optional[st
         # Apply
         planner = DeploymentPlanner(
             manifest,
+            schema_registry_deployer=schema_registry_deployer,
             kafka_deployer=kafka_deployer,
             flink_deployer=flink_deployer,
             connect_deployer=connect_deployer,
@@ -540,6 +569,7 @@ def status(project_dir: Optional[str]) -> None:
     from streamt.deployer.connect import ConnectDeployer
     from streamt.deployer.flink import FlinkDeployer
     from streamt.deployer.kafka import KafkaDeployer
+    from streamt.deployer.schema_registry import SchemaRegistryDeployer
 
     project_path = get_project_path(project_dir)
 
@@ -550,6 +580,30 @@ def status(project_dir: Optional[str]) -> None:
 
         compiler = Compiler(project)
         manifest = compiler.compile(dry_run=True)
+
+        # Check Schema Registry schemas
+        if manifest.artifacts.get("schemas"):
+            console.print("\n[cyan]Schemas:[/cyan]")
+            if project.runtime.schema_registry:
+                try:
+                    schema_deployer = SchemaRegistryDeployer(
+                        project.runtime.schema_registry.url,
+                        username=project.runtime.schema_registry.username,
+                        password=project.runtime.schema_registry.password,
+                    )
+                    for schema_data in manifest.artifacts["schemas"]:
+                        state = schema_deployer.get_schema_state(schema_data["subject"])
+                        if state.exists:
+                            console.print(
+                                f"  [green]OK[/green] {schema_data['subject']} "
+                                f"(version: {state.version}, type: {state.schema_type})"
+                            )
+                        else:
+                            console.print(f"  [red]MISSING[/red] {schema_data['subject']}")
+                except Exception as e:
+                    console.print(f"  [yellow]Cannot connect to Schema Registry: {e}[/yellow]")
+            else:
+                console.print("  [yellow]No Schema Registry configured[/yellow]")
 
         # Check Kafka topics
         console.print("\n[cyan]Topics:[/cyan]")

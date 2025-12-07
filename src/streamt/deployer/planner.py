@@ -9,12 +9,14 @@ from streamt.compiler.manifest import Manifest
 from streamt.deployer.connect import ConnectDeployer, ConnectorChange
 from streamt.deployer.flink import FlinkDeployer, FlinkJobChange
 from streamt.deployer.kafka import KafkaDeployer, TopicChange
+from streamt.deployer.schema_registry import SchemaChange, SchemaRegistryDeployer
 
 
 @dataclass
 class DeploymentPlan:
     """A deployment plan."""
 
+    schema_changes: list[SchemaChange] = field(default_factory=list)
     topic_changes: list[TopicChange] = field(default_factory=list)
     flink_changes: list[FlinkJobChange] = field(default_factory=list)
     connector_changes: list[ConnectorChange] = field(default_factory=list)
@@ -23,7 +25,8 @@ class DeploymentPlan:
     def has_changes(self) -> bool:
         """Check if there are any changes."""
         return (
-            any(c.action != "none" for c in self.topic_changes)
+            any(c.action != "none" for c in self.schema_changes)
+            or any(c.action != "none" for c in self.topic_changes)
             or any(c.action != "none" for c in self.flink_changes)
             or any(c.action != "none" for c in self.connector_changes)
         )
@@ -32,7 +35,8 @@ class DeploymentPlan:
     def creates(self) -> int:
         """Count of resources to create."""
         return (
-            sum(1 for c in self.topic_changes if c.action == "create")
+            sum(1 for c in self.schema_changes if c.action == "register")
+            + sum(1 for c in self.topic_changes if c.action == "create")
             + sum(1 for c in self.flink_changes if c.action == "submit")
             + sum(1 for c in self.connector_changes if c.action == "create")
         )
@@ -40,15 +44,18 @@ class DeploymentPlan:
     @property
     def updates(self) -> int:
         """Count of resources to update."""
-        return sum(1 for c in self.topic_changes if c.action == "update") + sum(
-            1 for c in self.connector_changes if c.action == "update"
+        return (
+            sum(1 for c in self.schema_changes if c.action == "update")
+            + sum(1 for c in self.topic_changes if c.action == "update")
+            + sum(1 for c in self.connector_changes if c.action == "update")
         )
 
     @property
     def deletes(self) -> int:
         """Count of resources to delete."""
         return (
-            sum(1 for c in self.topic_changes if c.action == "delete")
+            sum(1 for c in self.schema_changes if c.action == "delete")
+            + sum(1 for c in self.topic_changes if c.action == "delete")
             + sum(1 for c in self.flink_changes if c.action == "cancel")
             + sum(1 for c in self.connector_changes if c.action == "delete")
         )
@@ -60,6 +67,21 @@ class DeploymentPlan:
     def details(self) -> str:
         """Get detailed plan output."""
         lines = [self.summary(), ""]
+
+        for change in self.schema_changes:
+            if change.action == "register":
+                lines.append(f"+ schema: {change.subject}")
+                if change.desired:
+                    lines.append(f"    type: {change.desired.schema_type}")
+            elif change.action == "update":
+                lines.append(f"~ schema: {change.subject}")
+                for key, val in (change.changes or {}).items():
+                    if key == "schema":
+                        lines.append(f"    version: {val['from_version']} -> {val['to_version']}")
+                    elif key == "compatibility":
+                        lines.append(f"    compatibility: {val['from']} -> {val['to']}")
+            elif change.action == "delete":
+                lines.append(f"- schema: {change.subject}")
 
         for change in self.topic_changes:
             if change.action == "create":
@@ -102,12 +124,14 @@ class DeploymentPlanner:
     def __init__(
         self,
         manifest: Manifest,
+        schema_registry_deployer: Optional[SchemaRegistryDeployer] = None,
         kafka_deployer: Optional[KafkaDeployer] = None,
         flink_deployer: Optional[FlinkDeployer] = None,
         connect_deployer: Optional[ConnectDeployer] = None,
     ) -> None:
         """Initialize deployment planner."""
         self.manifest = manifest
+        self.schema_registry_deployer = schema_registry_deployer
         self.kafka_deployer = kafka_deployer
         self.flink_deployer = flink_deployer
         self.connect_deployer = connect_deployer
@@ -115,6 +139,21 @@ class DeploymentPlanner:
     def plan(self) -> DeploymentPlan:
         """Create a deployment plan."""
         plan = DeploymentPlan()
+
+        # Plan schemas first (before topics that may depend on them)
+        if self.schema_registry_deployer:
+            from streamt.compiler.manifest import SchemaArtifact
+            from streamt.deployer.schema_registry import SchemaArtifact as SRArtifact
+
+            for schema_data in self.manifest.artifacts.get("schemas", []):
+                artifact = SRArtifact(
+                    subject=schema_data["subject"],
+                    schema=schema_data["schema"],
+                    schema_type=schema_data.get("schema_type", "AVRO"),
+                    compatibility=schema_data.get("compatibility"),
+                )
+                change = self.schema_registry_deployer.plan_schema(artifact)
+                plan.schema_changes.append(change)
 
         # Plan topics
         if self.kafka_deployer:
@@ -166,7 +205,24 @@ class DeploymentPlanner:
             "errors": [],
         }
 
-        # Apply topics first
+        # Apply schemas first (before topics that may use them)
+        if self.schema_registry_deployer:
+            from streamt.deployer.schema_registry import SchemaArtifact as SRArtifact
+
+            for change in plan.schema_changes:
+                if change.action in ["register", "update"] and change.desired:
+                    try:
+                        result = self.schema_registry_deployer.apply_schema(change.desired)
+                        if result == "registered":
+                            results["created"].append(f"schema:{change.subject}")
+                        elif result == "updated":
+                            results["updated"].append(f"schema:{change.subject}")
+                        else:
+                            results["unchanged"].append(f"schema:{change.subject}")
+                    except Exception as e:
+                        results["errors"].append(f"schema:{change.subject}: {e}")
+
+        # Apply topics
         if self.kafka_deployer:
             for change in plan.topic_changes:
                 if change.action in ["create", "update"] and change.desired:

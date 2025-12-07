@@ -230,7 +230,7 @@ streamt/
 
 ## Roadmap
 
-- [ ] Schema Registry integration
+- [x] Schema Registry integration
 - [ ] Conduktor Gateway virtual topics
 - [ ] Kubernetes Flink operator support
 - [ ] CI/CD GitHub Actions

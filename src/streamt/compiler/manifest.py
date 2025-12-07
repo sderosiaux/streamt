@@ -93,6 +93,24 @@ class GatewayRuleArtifact:
 
 
 @dataclass
+class SchemaArtifact:
+    """Compiled schema artifact."""
+
+    subject: str
+    schema: dict[str, Any]
+    schema_type: str = "AVRO"  # AVRO, JSON, PROTOBUF
+    compatibility: Optional[str] = None  # BACKWARD, FORWARD, FULL, NONE
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "subject": self.subject,
+            "schema": self.schema,
+            "schema_type": self.schema_type,
+            "compatibility": self.compatibility,
+        }
+
+
+@dataclass
 class Manifest:
     """Manifest of compiled streamt project."""
 
