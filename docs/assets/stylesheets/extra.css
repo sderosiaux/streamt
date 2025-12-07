@@ -1,0 +1,171 @@
+/* Custom styling for streamt documentation */
+
+:root {
+  --md-primary-fg-color: #5046e5;
+  --md-primary-fg-color--light: #7c74ed;
+  --md-primary-fg-color--dark: #3730a3;
+  --md-accent-fg-color: #8b5cf6;
+}
+
+/* Hero section styling */
+.md-typeset .hero {
+  text-align: center;
+  padding: 2rem 0;
+}
+
+.md-typeset .hero h1 {
+  font-size: 3rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+}
+
+.md-typeset .hero p {
+  font-size: 1.25rem;
+  color: var(--md-default-fg-color--light);
+  max-width: 600px;
+  margin: 0 auto 2rem;
+}
+
+/* Feature grid */
+.md-typeset .grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1.5rem;
+  margin: 2rem 0;
+}
+
+.md-typeset .grid .card {
+  background: var(--md-code-bg-color);
+  border-radius: 8px;
+  padding: 1.5rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.md-typeset .grid .card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.md-typeset .grid .card h3 {
+  margin-top: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Command line styling */
+.md-typeset .command {
+  background: #1e1e2e;
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+.md-typeset .command code {
+  color: #cdd6f4;
+  background: transparent;
+}
+
+/* Status badges */
+.md-typeset .badge {
+  display: inline-block;
+  padding: 0.25rem 0.75rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.md-typeset .badge.alpha {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.md-typeset .badge.beta {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.md-typeset .badge.stable {
+  background: #d1fae5;
+  color: #065f46;
+}
+
+/* Architecture diagram styling */
+.md-typeset .architecture {
+  background: var(--md-code-bg-color);
+  border-radius: 8px;
+  padding: 2rem;
+  margin: 1.5rem 0;
+  overflow-x: auto;
+}
+
+/* Comparison table improvements */
+.md-typeset table.comparison {
+  width: 100%;
+}
+
+.md-typeset table.comparison th {
+  background: var(--md-primary-fg-color);
+  color: white;
+}
+
+/* CLI command highlighting */
+.md-typeset .cli-command {
+  font-family: var(--md-code-font-family);
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: 600;
+}
+
+/* Callout boxes */
+.md-typeset .tip-box {
+  background: linear-gradient(135deg, #e0e7ff 0%, #c7d2fe 100%);
+  border-left: 4px solid var(--md-primary-fg-color);
+  border-radius: 0 8px 8px 0;
+  padding: 1rem 1.5rem;
+  margin: 1rem 0;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .tip-box {
+  background: linear-gradient(135deg, #312e81 0%, #3730a3 100%);
+}
+
+/* Version selector styling */
+.md-typeset .version-warning {
+  background: #fef3c7;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 1rem 0;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .version-warning {
+  background: #451a03;
+  border-color: #d97706;
+}
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Better inline code */
+.md-typeset code:not([class]) {
+  background: var(--md-code-bg-color);
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+
+/* Navigation improvements */
+.md-nav__link {
+  transition: color 0.2s ease;
+}
+
+/* Footer styling */
+.md-footer {
+  margin-top: 2rem;
+}

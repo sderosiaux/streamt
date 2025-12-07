@@ -44,6 +44,11 @@ dev = [
     "types-pyyaml",
     "types-requests",
 ]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.5",
+    "pymdown-extensions>=10.0",
+]
 
 [project.scripts]
 streamt = "streamt.cli:main"
@@ -61,6 +66,14 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+markers = [
+    "integration: mark test as integration test requiring Docker",
+    "slow: mark test as slow (may take > 30 seconds)",
+    "kafka: mark test as requiring Kafka",
+    "flink: mark test as requiring Flink",
+    "connect: mark test as requiring Kafka Connect",
+    "schema_registry: mark test as requiring Schema Registry",
+]
 
 [tool.black]
 line-length = 100

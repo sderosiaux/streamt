@@ -1,11 +1,11 @@
 """Integration tests for Kafka deployer."""
 
-import pytest
 import time
 
-from streamt.deployer.kafka import KafkaDeployer
-from streamt.compiler.manifest import TopicArtifact
+import pytest
 
+from streamt.compiler.manifest import TopicArtifact
+from streamt.deployer.kafka import KafkaDeployer
 
 # Skip all tests if Kafka is not available
 pytestmark = pytest.mark.skipif(

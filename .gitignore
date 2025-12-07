@@ -48,9 +48,7 @@ htmlcov/
 
 # Generated
 generated/
-/docs/
-**/docs/*.html
-**/docs/manifest.json
+site/
 
 # OS
 .DS_Store

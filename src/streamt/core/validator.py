@@ -225,6 +225,20 @@ class ProjectValidator:
                         f"model '{model.name}'",
                     )
 
+        # Warn about security policies that require Gateway
+        if model.security and model.security.policies:
+            has_mask = any("mask" in p for p in model.security.policies)
+            has_allow_deny = any("allow" in p or "deny" in p for p in model.security.policies)
+
+            if has_mask or has_allow_deny:
+                if not (self.project.runtime.conduktor and self.project.runtime.conduktor.gateway):
+                    self.result.add_warning(
+                        "SECURITY_POLICIES_NOT_ENFORCED",
+                        f"Model '{model.name}' has security policies (masking/RBAC) that require "
+                        "Conduktor Gateway to enforce. Policies will be metadata-only without Gateway.",
+                        f"model '{model.name}'",
+                    )
+
         # Validate access control
         if model.access.value == "private" and model.group:
             # Check references from other models
@@ -275,6 +289,15 @@ class ProjectValidator:
     def _validate_exposures(self) -> None:
         """Validate exposure declarations."""
         for exposure in self.project.exposures:
+            # Warn about SLA configuration (metadata-only, not enforced)
+            if exposure.sla:
+                self.result.add_warning(
+                    "SLA_NOT_ENFORCED",
+                    f"Exposure '{exposure.name}' has SLA configuration. "
+                    "SLAs are metadata-only and not actively monitored/enforced.",
+                    f"exposure '{exposure.name}'",
+                )
+
             # Validate produces references
             for ref in exposure.produces:
                 if ref.source and ref.source not in self.source_names:
