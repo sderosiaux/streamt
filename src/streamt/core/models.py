@@ -22,8 +22,8 @@ class MaterializedType(str, Enum):
     SINK = "sink"
 
 
-class TestType(str, Enum):
-    """Types of tests."""
+class DataTestType(str, Enum):
+    """Types of data tests."""
 
     SCHEMA = "schema"
     SAMPLE = "sample"
@@ -531,12 +531,12 @@ class OnFailure(BaseModel):
     actions: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class Test(BaseModel):
-    """Test declaration."""
+class DataTest(BaseModel):
+    """Data test declaration."""
 
     name: str
     model: str
-    type: TestType
+    type: DataTestType
     assertions: list[dict[str, Any]] = Field(default_factory=list)
     sample_size: Optional[int] = None
     flink_cluster: Optional[str] = None
@@ -620,7 +620,7 @@ class StreamtProject(BaseModel):
     rules: Optional[Rules] = None
     sources: list[Source] = Field(default_factory=list)
     models: list[Model] = Field(default_factory=list)
-    tests: list[Test] = Field(default_factory=list)
+    tests: list[DataTest] = Field(default_factory=list)
     exposures: list[Exposure] = Field(default_factory=list)
 
     # Internal - set after parsing
@@ -640,7 +640,7 @@ class StreamtProject(BaseModel):
                 return model
         return None
 
-    def get_test(self, name: str) -> Optional[Test]:
+    def get_test(self, name: str) -> Optional[DataTest]:
         """Get test by name."""
         for test in self.tests:
             if test.name == name:

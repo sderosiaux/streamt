@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Any, Optional
 
-from streamt.core.models import Model, Source, StreamtProject, Test, TestType
+from streamt.core.models import DataTest, DataTestType, Model, Source, StreamtProject
 
 logger = logging.getLogger(__name__)
 
@@ -25,16 +25,16 @@ class TestRunner:
         self.project = project
         self._consumer = None
 
-    def run(self, tests: list[Test]) -> list[dict[str, Any]]:
+    def run(self, tests: list[DataTest]) -> list[dict[str, Any]]:
         """Run a list of tests."""
         results = []
 
         for test in tests:
-            if test.type == TestType.SCHEMA:
+            if test.type == DataTestType.SCHEMA:
                 result = self._run_schema_test(test)
-            elif test.type == TestType.SAMPLE:
+            elif test.type == DataTestType.SAMPLE:
                 result = self._run_sample_test(test)
-            elif test.type == TestType.CONTINUOUS:
+            elif test.type == DataTestType.CONTINUOUS:
                 result = self._run_continuous_test(test)
             else:
                 result = {
@@ -47,7 +47,7 @@ class TestRunner:
 
         return results
 
-    def _run_schema_test(self, test: Test) -> dict[str, Any]:
+    def _run_schema_test(self, test: DataTest) -> dict[str, Any]:
         """Run a schema test.
 
         Schema tests validate that the data conforms to expected types
@@ -97,7 +97,7 @@ class TestRunner:
             "message": "Schema validation passed (structural check only)",
         }
 
-    def _run_sample_test(self, test: Test) -> dict[str, Any]:
+    def _run_sample_test(self, test: DataTest) -> dict[str, Any]:
         """Run a sample test by consuming messages from Kafka."""
         errors = []
         warnings = []
@@ -173,7 +173,7 @@ class TestRunner:
             "warnings": warnings if warnings else None,
         }
 
-    def _run_continuous_test(self, test: Test) -> dict[str, Any]:
+    def _run_continuous_test(self, test: DataTest) -> dict[str, Any]:
         """Check status of a continuous test (deployed as Flink job)."""
         from streamt.deployer.flink import FlinkDeployer
 

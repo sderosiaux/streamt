@@ -20,10 +20,10 @@ from streamt.compiler.manifest import (
 from streamt.core.dag import DAGBuilder
 from streamt.core.models import (
     MaterializedType,
+    DataTest,
     Model,
     Source,
     StreamtProject,
-    Test,
     TopicDefaults,
 )
 from streamt.core.parser import ProjectParser
@@ -337,7 +337,7 @@ class Compiler:
             )
         )
 
-    def _compile_continuous_test(self, test: Test) -> None:
+    def _compile_continuous_test(self, test: DataTest) -> None:
         """Compile a continuous test as a Flink monitoring job.
 
         Generates a Flink job that:
@@ -371,7 +371,7 @@ class Compiler:
         )
 
     def _generate_test_flink_sql(
-        self, test: Test, source_topic: str, columns: list[str]
+        self, test: DataTest, source_topic: str, columns: list[str]
     ) -> str:
         """Generate Flink SQL for a continuous test."""
         bootstrap = self._get_flink_bootstrap_servers()

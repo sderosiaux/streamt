@@ -2,12 +2,12 @@
 
 from streamt.core.dag import DAGBuilder
 from streamt.core.models import (
+    DataTest,
     Exposure,
     Model,
     Project,
     Source,
     StreamtProject,
-    Test,
 )
 from streamt.core.parser import ProjectParser
 from streamt.core.validator import ProjectValidator
@@ -16,7 +16,7 @@ __all__ = [
     "Project",
     "Source",
     "Model",
-    "Test",
+    "DataTest",
     "Exposure",
     "StreamtProject",
     "ProjectParser",

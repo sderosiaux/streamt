@@ -6,7 +6,16 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
-from confluent_kafka.admin import AdminClient, ConfigResource, NewPartitions, NewTopic, ResourceType
+from confluent_kafka.admin import (
+    AdminClient,
+    AlterConfigOpType,
+    ConfigEntry,
+    ConfigResource,
+    ConfigSource,
+    NewPartitions,
+    NewTopic,
+    ResourceType,
+)
 
 from streamt.compiler.manifest import TopicArtifact
 
@@ -204,18 +213,27 @@ class KafkaDeployer:
                 except Exception as e:
                     raise RuntimeError(f"Failed to increase partitions for '{topic}': {e}")
 
-        # Handle config changes
+        # Handle config changes using incremental_alter_configs (alter_configs is deprecated)
         config_changes = {
             k.replace("config.", ""): v["to"] for k, v in changes.items() if k.startswith("config.")
         }
 
         if config_changes:
+            incremental_configs = [
+                ConfigEntry(
+                    name=config_name,
+                    value=str(config_value),
+                    source=ConfigSource.DYNAMIC_TOPIC_CONFIG,
+                    incremental_operation=AlterConfigOpType.SET,
+                )
+                for config_name, config_value in config_changes.items()
+            ]
             config_resource = ConfigResource(
                 ResourceType.TOPIC,
                 artifact.name,
-                set_config=config_changes,
+                incremental_configs=incremental_configs,
             )
-            futures = self.admin.alter_configs([config_resource])
+            futures = self.admin.incremental_alter_configs([config_resource])
             for resource, future in futures.items():
                 try:
                     future.result(timeout=DEFAULT_TIMEOUT)

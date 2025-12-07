@@ -26,6 +26,8 @@ from streamt.compiler.compiler import Compiler
 from streamt.compiler.manifest import FlinkJobArtifact
 from streamt.core.models import (
     ColumnDefinition,
+    DataTest,
+    DataTestType,
     KafkaConfig,
     MaterializedType,
     Model,
@@ -33,8 +35,6 @@ from streamt.core.models import (
     RuntimeConfig,
     Source,
     StreamtProject,
-    Test,
-    TestType,
     TopicConfig,
 )
 
@@ -204,10 +204,10 @@ WHERE event_id IS NOT NULL""",
     )
 
     # Create continuous test
-    test = Test(
+    test = DataTest(
         name=test_name,
         model="events_clean",
-        type=TestType.CONTINUOUS,
+        type=DataTestType.CONTINUOUS,
         assertions=[
             {"not_null": {"columns": ["event_id", "user_id", "event_type"]}},
             {"accepted_values": {"column": "event_type", "values": valid_event_types}},

@@ -17,10 +17,10 @@ from streamt.core.models import (
     Model,
     ProjectInfo,
     Rules,
+    DataTest,
     RuntimeConfig,
     Source,
     StreamtProject,
-    Test,
 )
 
 
@@ -239,14 +239,14 @@ class ProjectParser:
 
         return models
 
-    def _parse_tests(self, data: dict[str, Any]) -> list[Test]:
+    def _parse_tests(self, data: dict[str, Any]) -> list[DataTest]:
         """Parse tests from project file and tests/ directory."""
         tests = []
 
         # From main project file
         if "tests" in data:
             for test_data in data["tests"]:
-                tests.append(Test(**test_data))
+                tests.append(DataTest(**test_data))
 
         # From tests/ directory
         tests_dir = self.project_path / "tests"
@@ -255,13 +255,13 @@ class ProjectParser:
                 file_data = self._load_yaml(yml_file)
                 if "tests" in file_data:
                     for test_data in file_data["tests"]:
-                        tests.append(Test(**test_data))
+                        tests.append(DataTest(**test_data))
 
             for yaml_file in tests_dir.glob("*.yaml"):
                 file_data = self._load_yaml(yaml_file)
                 if "tests" in file_data:
                     for test_data in file_data["tests"]:
-                        tests.append(Test(**test_data))
+                        tests.append(DataTest(**test_data))
 
         return tests
 
