@@ -116,17 +116,32 @@ runtime:
 | `default` | string | No | Default cluster name |
 | `clusters.<name>.rest_url` | string | Yes | Connect REST API URL |
 
-### Conduktor (Optional)
+### Conduktor Gateway (Optional)
+
+Required for `materialized: virtual_topic`. See [Gateway Guide](../guides/gateway.md).
 
 ```yaml
 runtime:
   conduktor:
     gateway:
-      url: http://gateway:8888
-    console:
+      admin_url: http://localhost:8888       # Required: Gateway Admin API
+      proxy_bootstrap: localhost:6969         # Required: Gateway proxy for clients
+      username: ${GATEWAY_USER}               # Optional (default: admin)
+      password: ${GATEWAY_PASSWORD}           # Optional (default: conduktor)
+      virtual_cluster: default                # Optional: For multi-tenant setups
+
+    console:                                  # Optional: Conduktor Console
       url: http://console:8080
       api_key: ${CONDUKTOR_API_KEY}
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `admin_url` | string | Yes | Gateway Admin API URL |
+| `proxy_bootstrap` | string | Yes | Gateway proxy for Kafka clients |
+| `username` | string | No | Admin API username (default: admin) |
+| `password` | string | No | Admin API password (default: conduktor) |
+| `virtual_cluster` | string | No | Virtual cluster for multi-tenancy |
 
 ---
 
