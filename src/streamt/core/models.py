@@ -301,6 +301,28 @@ class FreshnessConfig(BaseModel):
     warn_after_seconds: Optional[int] = None
 
 
+class WatermarkStrategy(str, Enum):
+    """Watermark strategies for event time processing."""
+
+    BOUNDED_OUT_OF_ORDERNESS = "bounded_out_of_orderness"
+    MONOTONOUSLY_INCREASING = "monotonously_increasing"
+
+
+class WatermarkConfig(BaseModel):
+    """Watermark configuration for event time processing."""
+
+    strategy: WatermarkStrategy = WatermarkStrategy.BOUNDED_OUT_OF_ORDERNESS
+    max_out_of_orderness_ms: Optional[int] = 5000  # 5 seconds default
+
+
+class EventTimeConfig(BaseModel):
+    """Event time configuration for streaming processing."""
+
+    column: str  # The column containing event time
+    watermark: Optional[WatermarkConfig] = None
+    allowed_lateness_ms: Optional[int] = None  # Allow late events within this window
+
+
 class Source(BaseModel):
     """Source declaration."""
 
@@ -315,6 +337,7 @@ class Source(BaseModel):
     tags: list[str] = Field(default_factory=list)
     columns: list[ColumnDefinition] = Field(default_factory=list)
     freshness: Optional[FreshnessConfig] = None
+    event_time: Optional[EventTimeConfig] = None
 
 
 # ============================================================================
@@ -337,6 +360,7 @@ class FlinkJobConfig(BaseModel):
     parallelism: Optional[int] = None
     checkpoint_interval_ms: Optional[int] = None
     state_backend: Optional[str] = None
+    state_ttl_ms: Optional[int] = None  # Time-to-live for state entries
 
 
 class SinkConfig(BaseModel):

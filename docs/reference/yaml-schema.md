@@ -314,16 +314,20 @@ sources:
 | `max_lag_seconds` | int | Maximum acceptable lag (error) |
 | `warn_after_seconds` | int | Lag threshold for warning |
 
-### Event Time Configuration (Coming Soon)
+### Event Time Configuration
 
-The following configuration is planned for explicit temporal semantics:
+Configure event time semantics for streaming processing. This enables proper watermark generation for windowed aggregations.
 
 ```yaml
-# PLANNED - Not yet supported
 sources:
   - name: events
     topic: events.raw.v1
+    columns:
+      - name: event_id
+      - name: user_id
+      - name: event_timestamp  # Will be TIMESTAMP(3) in Flink
 
+    # Event time configuration
     event_time:
       column: event_timestamp           # Which column is the event time
       watermark:
@@ -332,14 +336,32 @@ sources:
       allowed_lateness_ms: 60000        # Accept data up to 1 minute late
 ```
 
-This will generate proper Flink SQL watermark declarations:
+This generates proper Flink SQL watermark declarations:
 ```sql
 CREATE TABLE events (
   ...
-  event_timestamp TIMESTAMP(3),
-  WATERMARK FOR event_timestamp AS event_timestamp - INTERVAL '5' SECOND
+  `event_timestamp` TIMESTAMP(3),
+  WATERMARK FOR `event_timestamp` AS `event_timestamp` - INTERVAL '5' SECOND
 ) WITH (...)
 ```
+
+**Event Time Fields:**
+
+| Field | Type | Description | Required |
+|-------|------|-------------|----------|
+| `column` | string | Column name containing event time | Yes |
+| `watermark.strategy` | string | `bounded_out_of_orderness` or `monotonously_increasing` | No (default: bounded) |
+| `watermark.max_out_of_orderness_ms` | int | Max delay in ms | No (default: 5000) |
+| `allowed_lateness_ms` | int | Accept late events within window | No |
+
+**Watermark Strategies:**
+
+| Strategy | Use Case |
+|----------|----------|
+| `bounded_out_of_orderness` | Events can arrive out of order (most common) |
+| `monotonously_increasing` | Events always arrive in order (rare) |
+
+See [Streaming Fundamentals](../concepts/streaming-fundamentals.md) for more on watermarks.
 
 ---
 

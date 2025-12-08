@@ -329,10 +329,9 @@ streamt status [OPTIONS]
 | Option | Description |
 |--------|-------------|
 | `--project-dir PATH` | Project directory |
-| `--topics` | Show only topics |
-| `--jobs` | Show only Flink jobs |
-| `--connectors` | Show only connectors |
-| `--tests` | Show test status |
+| `--lag` | Show consumer lag and message counts for topics |
+| `--format FORMAT` | Output format: `text` (default) or `json` |
+| `--filter PATTERN` | Filter resources by name pattern (glob-style) |
 
 **Examples:**
 
@@ -340,30 +339,60 @@ streamt status [OPTIONS]
 # Full status
 streamt status
 
-# Topics only
-streamt status --topics
+# With consumer lag info
+streamt status --lag
 
-# With test status
-streamt status --tests
+# JSON output (for scripting)
+streamt status --format json
+
+# Filter by name pattern
+streamt status --filter "payments*"
+
+# Combine options
+streamt status --lag --filter "orders*"
 ```
 
-**Output:**
+**Output (text):**
 
 ```
-Infrastructure Status:
-
 Topics:
-  orders.clean.v1    ✓ exists (12 partitions, rf=3)
-  orders.metrics.v1  ✓ exists (6 partitions, rf=3)
+  OK orders.clean.v1 (partitions: 12, rf: 3) ~15420 msgs
+  OK orders.metrics.v1 (partitions: 6, rf: 3) ~8210 msgs
 
 Flink Jobs:
-  order_metrics      ✓ RUNNING (8/8 tasks)
+  RUNNING order_metrics
 
 Connectors:
-  orders_snowflake   ✓ RUNNING (2/2 tasks)
+  RUNNING orders_snowflake
 
-Continuous Tests:
-  orders_monitoring  ✓ RUNNING
+Summary: Topics: 2 OK, 0 missing | Jobs: 1 running, 0 other
+```
+
+**Output (JSON):**
+
+```json
+{
+  "project": "payments-pipeline",
+  "topics": [
+    {
+      "name": "orders.clean.v1",
+      "exists": true,
+      "partitions": 12,
+      "replication_factor": 3,
+      "message_count": 15420
+    }
+  ],
+  "flink_jobs": [
+    {
+      "name": "order_metrics",
+      "exists": true,
+      "job_id": "abc123",
+      "status": "RUNNING"
+    }
+  ],
+  "connectors": [],
+  "schemas": []
+}
 ```
 
 ---
@@ -483,7 +512,6 @@ The following commands and options are planned:
 
 | Command/Option | Description | Status |
 |----------------|-------------|--------|
-| `streamt status --lag` | Show consumer lag for topics | Planned |
 | `streamt status --health` | Health checks with thresholds | Planned |
 | `streamt rollback` | Rollback to previous deployment | Planned |
 | `streamt diff` | Show diff between local and deployed | Planned |

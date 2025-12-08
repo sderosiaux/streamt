@@ -319,8 +319,8 @@ streamt/
 
 ### Now (Active Development)
 
-- [ ] `streamt status` command — Show deployed jobs, topics, connectors with health
-- [ ] Event time configuration — `event_time`, `watermark`, `allowed_lateness` in YAML
+- [x] `streamt status` command — Show deployed jobs, topics, connectors with health (includes `--lag`, `--format json`, `--filter`)
+- [x] Event time configuration — `event_time`, `watermark`, `allowed_lateness` in YAML
 - [ ] Improved error messages — Actionable errors with links to docs
 - [x] Streaming fundamentals docs — Teach watermarks, windows, exactly-once
 

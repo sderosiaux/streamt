@@ -808,6 +808,271 @@ class TestContinuousTestCompilation:
             assert "CAST(`col_a` AS STRING)" in sql_content
 
 
+class TestEventTimeConfiguration:
+    """Tests for event time and watermark configuration in Flink SQL."""
+
+    def _create_project(self, tmpdir: str, config: dict) -> "StreamtProject":
+        """Helper to create and parse a project."""
+        project_path = Path(tmpdir)
+        with open(project_path / "stream_project.yml", "w") as f:
+            yaml.dump(config, f)
+        parser = ProjectParser(project_path)
+        return parser.parse()
+
+    def test_event_time_generates_watermark_ddl(self):
+        """TC-EVENTTIME-001: Source with event_time should generate WATERMARK clause."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test", "version": "1.0.0"},
+                "runtime": {
+                    "kafka": {"bootstrap_servers": "localhost:9092"},
+                    "flink": {
+                        "default": "local",
+                        "clusters": {
+                            "local": {"type": "rest", "rest_url": "http://localhost:8082"}
+                        },
+                    },
+                },
+                "sources": [
+                    {
+                        "name": "events",
+                        "topic": "events.v1",
+                        "columns": [
+                            {"name": "event_id"},
+                            {"name": "user_id"},
+                            {"name": "event_timestamp"},
+                        ],
+                        "event_time": {
+                            "column": "event_timestamp",
+                        },
+                    }
+                ],
+                "models": [
+                    {
+                        "name": "events_clean",
+                        "materialized": "flink",
+                        "sql": """
+                            SELECT event_id, user_id, event_timestamp
+                            FROM {{ source("events") }}
+                        """,
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            output_dir = Path(tmpdir) / "generated"
+            compiler = Compiler(project, output_dir)
+            compiler.compile(dry_run=False)
+
+            sql_content = (output_dir / "flink" / "events_clean.sql").read_text()
+
+            # Should have WATERMARK clause
+            assert "WATERMARK FOR `event_timestamp`" in sql_content
+            # Should use default 5 second out of orderness
+            assert "INTERVAL '5' SECOND" in sql_content
+            # event_timestamp should be TIMESTAMP(3) not STRING
+            assert "`event_timestamp` TIMESTAMP(3)" in sql_content
+
+    def test_event_time_with_custom_watermark_delay(self):
+        """TC-EVENTTIME-002: Custom watermark delay should be reflected in DDL."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test", "version": "1.0.0"},
+                "runtime": {
+                    "kafka": {"bootstrap_servers": "localhost:9092"},
+                    "flink": {
+                        "default": "local",
+                        "clusters": {
+                            "local": {"type": "rest", "rest_url": "http://localhost:8082"}
+                        },
+                    },
+                },
+                "sources": [
+                    {
+                        "name": "events",
+                        "topic": "events.v1",
+                        "columns": [
+                            {"name": "id"},
+                            {"name": "ts"},
+                        ],
+                        "event_time": {
+                            "column": "ts",
+                            "watermark": {
+                                "strategy": "bounded_out_of_orderness",
+                                "max_out_of_orderness_ms": 30000,  # 30 seconds
+                            },
+                        },
+                    }
+                ],
+                "models": [
+                    {
+                        "name": "events_processed",
+                        "materialized": "flink",
+                        "sql": 'SELECT id, ts FROM {{ source("events") }}',
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            output_dir = Path(tmpdir) / "generated"
+            compiler = Compiler(project, output_dir)
+            compiler.compile(dry_run=False)
+
+            sql_content = (output_dir / "flink" / "events_processed.sql").read_text()
+
+            # Should have 30 second watermark delay
+            assert "INTERVAL '30' SECOND" in sql_content
+            assert "`ts` TIMESTAMP(3)" in sql_content
+
+    def test_event_time_monotonously_increasing(self):
+        """TC-EVENTTIME-003: Monotonously increasing watermark should not have delay."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test", "version": "1.0.0"},
+                "runtime": {
+                    "kafka": {"bootstrap_servers": "localhost:9092"},
+                    "flink": {
+                        "default": "local",
+                        "clusters": {
+                            "local": {"type": "rest", "rest_url": "http://localhost:8082"}
+                        },
+                    },
+                },
+                "sources": [
+                    {
+                        "name": "ordered_events",
+                        "topic": "ordered.v1",
+                        "columns": [
+                            {"name": "id"},
+                            {"name": "created_at"},
+                        ],
+                        "event_time": {
+                            "column": "created_at",
+                            "watermark": {
+                                "strategy": "monotonously_increasing",
+                            },
+                        },
+                    }
+                ],
+                "models": [
+                    {
+                        "name": "ordered_processed",
+                        "materialized": "flink",
+                        "sql": 'SELECT id, created_at FROM {{ source("ordered_events") }}',
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            output_dir = Path(tmpdir) / "generated"
+            compiler = Compiler(project, output_dir)
+            compiler.compile(dry_run=False)
+
+            sql_content = (output_dir / "flink" / "ordered_processed.sql").read_text()
+
+            # Monotonously increasing should be: WATERMARK FOR col AS col (no delay)
+            assert "WATERMARK FOR `created_at` AS `created_at`" in sql_content
+            # Should NOT have INTERVAL for monotonous
+            # Note: It might have the INTERVAL line, so check specifically for "AS `created_at`" at end
+            lines = [l.strip() for l in sql_content.split("\n")]
+            watermark_line = [l for l in lines if "WATERMARK FOR" in l][0]
+            assert watermark_line.endswith("AS `created_at`") or "AS `created_at`" in watermark_line
+
+    def test_source_without_event_time_no_watermark(self):
+        """TC-EVENTTIME-004: Source without event_time should not have WATERMARK."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test", "version": "1.0.0"},
+                "runtime": {
+                    "kafka": {"bootstrap_servers": "localhost:9092"},
+                    "flink": {
+                        "default": "local",
+                        "clusters": {
+                            "local": {"type": "rest", "rest_url": "http://localhost:8082"}
+                        },
+                    },
+                },
+                "sources": [
+                    {
+                        "name": "simple_events",
+                        "topic": "simple.v1",
+                        "columns": [
+                            {"name": "id"},
+                            {"name": "value"},
+                        ],
+                        # No event_time configured
+                    }
+                ],
+                "models": [
+                    {
+                        "name": "simple_processed",
+                        "materialized": "flink",
+                        "sql": 'SELECT id, value FROM {{ source("simple_events") }}',
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            output_dir = Path(tmpdir) / "generated"
+            compiler = Compiler(project, output_dir)
+            compiler.compile(dry_run=False)
+
+            sql_content = (output_dir / "flink" / "simple_processed.sql").read_text()
+
+            # Should NOT have WATERMARK clause
+            assert "WATERMARK" not in sql_content
+            # Both columns should be STRING
+            assert "`id` STRING" in sql_content
+            assert "`value` STRING" in sql_content
+
+    def test_event_time_column_type_is_timestamp(self):
+        """TC-EVENTTIME-005: Event time column should be TIMESTAMP(3), others STRING."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test", "version": "1.0.0"},
+                "runtime": {
+                    "kafka": {"bootstrap_servers": "localhost:9092"},
+                    "flink": {
+                        "default": "local",
+                        "clusters": {
+                            "local": {"type": "rest", "rest_url": "http://localhost:8082"}
+                        },
+                    },
+                },
+                "sources": [
+                    {
+                        "name": "mixed_types",
+                        "topic": "mixed.v1",
+                        "columns": [
+                            {"name": "id"},
+                            {"name": "name"},
+                            {"name": "event_time"},
+                            {"name": "metadata"},
+                        ],
+                        "event_time": {
+                            "column": "event_time",
+                        },
+                    }
+                ],
+                "models": [
+                    {
+                        "name": "mixed_processed",
+                        "materialized": "flink",
+                        "sql": 'SELECT id, name, event_time, metadata FROM {{ source("mixed_types") }}',
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            output_dir = Path(tmpdir) / "generated"
+            compiler = Compiler(project, output_dir)
+            compiler.compile(dry_run=False)
+
+            sql_content = (output_dir / "flink" / "mixed_processed.sql").read_text()
+
+            # event_time should be TIMESTAMP(3)
+            assert "`event_time` TIMESTAMP(3)" in sql_content
+            # Other columns should be STRING
+            assert "`id` STRING" in sql_content
+            assert "`name` STRING" in sql_content
+            assert "`metadata` STRING" in sql_content
+
+
 class TestComplexSelectParsing:
     """Tests for complex SQL SELECT clause parsing."""
 

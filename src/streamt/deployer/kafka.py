@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
+from confluent_kafka import Consumer, TopicPartition
 from confluent_kafka.admin import (
     AdminClient,
     AlterConfigOpType,
@@ -38,6 +39,27 @@ class TopicState:
     def __post_init__(self) -> None:
         if self.config is None:
             self.config = {}
+
+
+@dataclass
+class PartitionLag:
+    """Lag information for a single partition."""
+
+    partition: int
+    current_offset: int
+    end_offset: int
+    lag: int
+
+
+@dataclass
+class ConsumerGroupLag:
+    """Consumer group lag information for a topic."""
+
+    group_id: str
+    topic: str
+    total_lag: int
+    partitions: list[PartitionLag] = field(default_factory=list)
+    state: Optional[str] = None  # e.g., "Stable", "Empty", "Dead"
 
 
 @dataclass
@@ -282,3 +304,129 @@ class KafkaDeployer:
         """Compute diff between current and desired state."""
         change = self.plan_topic(artifact)
         return change.changes
+
+    def get_consumer_groups(self) -> list[str]:
+        """List all consumer groups in the cluster."""
+        future = self.admin.list_consumer_groups()
+        result = future.result(timeout=DEFAULT_TIMEOUT)
+        return [g.group_id for g in result.valid]
+
+    def get_consumer_group_lag(
+        self, group_id: str, topic: str
+    ) -> Optional[ConsumerGroupLag]:
+        """Get consumer group lag for a specific topic.
+
+        Returns None if the group doesn't exist or has no committed offsets.
+        """
+        # Get topic partitions
+        metadata = self.admin.list_topics(timeout=DEFAULT_TIMEOUT)
+        if topic not in metadata.topics:
+            return None
+
+        topic_metadata = metadata.topics[topic]
+        partition_count = len(topic_metadata.partitions)
+
+        if partition_count == 0:
+            return None
+
+        # Create a temporary consumer to get committed offsets
+        # Note: This is more reliable than using AdminClient for offset fetching
+        consumer_config = {
+            "bootstrap.servers": list(self.admin.list_topics().brokers.values())[0][0]
+            if self.admin.list_topics().brokers
+            else "localhost:9092",
+            "group.id": group_id,
+            "enable.auto.commit": False,
+        }
+
+        try:
+            # Use AdminClient to list consumer group offsets (Kafka 2.4+)
+            from confluent_kafka.admin import ConsumerGroupTopicPartitions
+
+            topic_partitions = [
+                TopicPartition(topic, p) for p in range(partition_count)
+            ]
+            cgtp = ConsumerGroupTopicPartitions(group_id, topic_partitions)
+
+            # Get committed offsets
+            futures = self.admin.list_consumer_group_offsets([cgtp])
+            result = list(futures.values())[0].result(timeout=DEFAULT_TIMEOUT)
+
+            # Get end offsets (high watermarks)
+            consumer = Consumer(consumer_config)
+            try:
+                end_offsets = {}
+                for tp in topic_partitions:
+                    low, high = consumer.get_watermark_offsets(tp, timeout=DEFAULT_TIMEOUT)
+                    end_offsets[tp.partition] = high
+            finally:
+                consumer.close()
+
+            # Calculate lag per partition
+            partition_lags = []
+            total_lag = 0
+
+            for tp in result.topic_partitions:
+                if tp.topic != topic:
+                    continue
+                current_offset = tp.offset if tp.offset >= 0 else 0
+                end_offset = end_offsets.get(tp.partition, 0)
+                lag = max(0, end_offset - current_offset)
+                total_lag += lag
+
+                partition_lags.append(
+                    PartitionLag(
+                        partition=tp.partition,
+                        current_offset=current_offset,
+                        end_offset=end_offset,
+                        lag=lag,
+                    )
+                )
+
+            return ConsumerGroupLag(
+                group_id=group_id,
+                topic=topic,
+                total_lag=total_lag,
+                partitions=partition_lags,
+            )
+
+        except Exception as e:
+            logger.warning(f"Failed to get consumer group lag for {group_id}: {e}")
+            return None
+
+    def get_topic_message_count(self, topic: str) -> int:
+        """Get approximate message count for a topic (sum of end offsets)."""
+        metadata = self.admin.list_topics(timeout=DEFAULT_TIMEOUT)
+        if topic not in metadata.topics:
+            return 0
+
+        topic_metadata = metadata.topics[topic]
+        partition_count = len(topic_metadata.partitions)
+
+        if partition_count == 0:
+            return 0
+
+        # Create a temporary consumer to get watermarks
+        brokers = list(self.admin.list_topics().brokers.values())
+        if not brokers:
+            return 0
+
+        broker_host, broker_port = brokers[0]
+        consumer_config = {
+            "bootstrap.servers": f"{broker_host}:{broker_port}",
+            "group.id": "_streamt_internal_count",
+            "enable.auto.commit": False,
+        }
+
+        try:
+            consumer = Consumer(consumer_config)
+            total = 0
+            for partition in range(partition_count):
+                tp = TopicPartition(topic, partition)
+                low, high = consumer.get_watermark_offsets(tp, timeout=DEFAULT_TIMEOUT)
+                total += high - low
+            consumer.close()
+            return total
+        except Exception as e:
+            logger.warning(f"Failed to get message count for {topic}: {e}")
+            return 0

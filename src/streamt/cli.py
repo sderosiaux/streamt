@@ -568,8 +568,45 @@ def lineage(
     type=click.Path(exists=True),
     help="Path to project directory",
 )
-def status(project_dir: Optional[str]) -> None:
-    """Show status of deployed resources."""
+@click.option(
+    "--lag",
+    is_flag=True,
+    help="Show consumer lag for topics (requires consumer groups)",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["text", "json"]),
+    default="text",
+    help="Output format (default: text)",
+)
+@click.option(
+    "--filter",
+    "filter_pattern",
+    type=str,
+    help="Filter resources by name pattern (glob-style)",
+)
+def status(
+    project_dir: Optional[str],
+    lag: bool,
+    output_format: str,
+    filter_pattern: Optional[str],
+) -> None:
+    """Show status of deployed resources.
+
+    Examples:
+
+        streamt status              # Basic status
+
+        streamt status --lag        # Include consumer lag
+
+        streamt status --format json  # JSON output
+
+        streamt status --filter "payments*"  # Filter by name
+    """
+    import fnmatch
+    import json
+
     from streamt.compiler import Compiler
     from streamt.core.parser import EnvVarError, ParseError, ProjectParser
     from streamt.deployer.connect import ConnectDeployer
@@ -579,6 +616,12 @@ def status(project_dir: Optional[str]) -> None:
 
     project_path = get_project_path(project_dir)
 
+    def matches_filter(name: str) -> bool:
+        """Check if name matches the filter pattern."""
+        if not filter_pattern:
+            return True
+        return fnmatch.fnmatch(name, filter_pattern)
+
     try:
         # Parse and compile
         parser = ProjectParser(project_path)
@@ -587,9 +630,19 @@ def status(project_dir: Optional[str]) -> None:
         compiler = Compiler(project)
         manifest = compiler.compile(dry_run=True)
 
+        # Collect status data for JSON output
+        status_data = {
+            "project": project.project.name,
+            "schemas": [],
+            "topics": [],
+            "flink_jobs": [],
+            "connectors": [],
+        }
+
         # Check Schema Registry schemas
         if manifest.artifacts.get("schemas"):
-            console.print("\n[cyan]Schemas:[/cyan]")
+            if output_format == "text":
+                console.print("\n[cyan]Schemas:[/cyan]")
             if project.runtime.schema_registry:
                 try:
                     schema_deployer = SchemaRegistryDeployer(
@@ -598,38 +651,75 @@ def status(project_dir: Optional[str]) -> None:
                         password=project.runtime.schema_registry.password,
                     )
                     for schema_data in manifest.artifacts["schemas"]:
+                        if not matches_filter(schema_data["subject"]):
+                            continue
                         state = schema_deployer.get_schema_state(schema_data["subject"])
-                        if state.exists:
-                            console.print(
-                                f"  [green]OK[/green] {schema_data['subject']} "
-                                f"(version: {state.version}, type: {state.schema_type})"
-                            )
-                        else:
-                            console.print(f"  [red]MISSING[/red] {schema_data['subject']}")
+                        schema_status = {
+                            "subject": schema_data["subject"],
+                            "exists": state.exists,
+                            "version": state.version if state.exists else None,
+                            "schema_type": state.schema_type if state.exists else None,
+                        }
+                        status_data["schemas"].append(schema_status)
+
+                        if output_format == "text":
+                            if state.exists:
+                                console.print(
+                                    f"  [green]OK[/green] {schema_data['subject']} "
+                                    f"(version: {state.version}, type: {state.schema_type})"
+                                )
+                            else:
+                                console.print(f"  [red]MISSING[/red] {schema_data['subject']}")
                 except Exception as e:
-                    console.print(f"  [yellow]Cannot connect to Schema Registry: {e}[/yellow]")
+                    if output_format == "text":
+                        console.print(f"  [yellow]Cannot connect to Schema Registry: {e}[/yellow]")
             else:
-                console.print("  [yellow]No Schema Registry configured[/yellow]")
+                if output_format == "text":
+                    console.print("  [yellow]No Schema Registry configured[/yellow]")
 
         # Check Kafka topics
-        console.print("\n[cyan]Topics:[/cyan]")
+        if output_format == "text":
+            console.print("\n[cyan]Topics:[/cyan]")
+        kafka_deployer = None
         try:
             kafka_deployer = KafkaDeployer(project.runtime.kafka.bootstrap_servers)
             for topic_data in manifest.artifacts.get("topics", []):
+                if not matches_filter(topic_data["name"]):
+                    continue
                 state = kafka_deployer.get_topic_state(topic_data["name"])
-                if state.exists:
-                    console.print(
-                        f"  [green]OK[/green] {topic_data['name']} "
-                        f"(partitions: {state.partitions}, rf: {state.replication_factor})"
-                    )
-                else:
-                    console.print(f"  [red]MISSING[/red] {topic_data['name']}")
+                topic_status = {
+                    "name": topic_data["name"],
+                    "exists": state.exists,
+                    "partitions": state.partitions if state.exists else None,
+                    "replication_factor": state.replication_factor if state.exists else None,
+                }
+
+                # Get message count and lag if requested
+                if lag and state.exists:
+                    msg_count = kafka_deployer.get_topic_message_count(topic_data["name"])
+                    topic_status["message_count"] = msg_count
+
+                status_data["topics"].append(topic_status)
+
+                if output_format == "text":
+                    if state.exists:
+                        status_line = (
+                            f"  [green]OK[/green] {topic_data['name']} "
+                            f"(partitions: {state.partitions}, rf: {state.replication_factor})"
+                        )
+                        if lag and "message_count" in topic_status:
+                            status_line += f" [dim]~{topic_status['message_count']} msgs[/dim]"
+                        console.print(status_line)
+                    else:
+                        console.print(f"  [red]MISSING[/red] {topic_data['name']}")
         except Exception as e:
-            console.print(f"  [yellow]Cannot connect to Kafka: {e}[/yellow]")
+            if output_format == "text":
+                console.print(f"  [yellow]Cannot connect to Kafka: {e}[/yellow]")
 
         # Check Flink jobs
         if manifest.artifacts.get("flink_jobs"):
-            console.print("\n[cyan]Flink Jobs:[/cyan]")
+            if output_format == "text":
+                console.print("\n[cyan]Flink Jobs:[/cyan]")
             if project.runtime.flink and project.runtime.flink.clusters:
                 try:
                     default_cluster = project.runtime.flink.default
@@ -639,21 +729,37 @@ def status(project_dir: Optional[str]) -> None:
                         if cluster_config.rest_url:
                             flink_deployer = FlinkDeployer(cluster_config.rest_url)
                             for job_data in manifest.artifacts["flink_jobs"]:
+                                if not matches_filter(job_data["name"]):
+                                    continue
                                 state = flink_deployer.get_job_state(job_data["name"])
-                                if state.exists:
-                                    console.print(
-                                        f"  [green]{state.status}[/green] {job_data['name']}"
-                                    )
-                                else:
-                                    console.print(f"  [red]NOT FOUND[/red] {job_data['name']}")
+                                job_status = {
+                                    "name": job_data["name"],
+                                    "exists": state.exists,
+                                    "job_id": state.job_id if state.exists else None,
+                                    "status": state.status if state.exists else None,
+                                }
+                                status_data["flink_jobs"].append(job_status)
+
+                                if output_format == "text":
+                                    if state.exists:
+                                        # Color code status
+                                        status_color = "green" if state.status == "RUNNING" else "yellow"
+                                        console.print(
+                                            f"  [{status_color}]{state.status}[/{status_color}] {job_data['name']}"
+                                        )
+                                    else:
+                                        console.print(f"  [red]NOT FOUND[/red] {job_data['name']}")
                 except Exception as e:
-                    console.print(f"  [yellow]Cannot connect to Flink: {e}[/yellow]")
+                    if output_format == "text":
+                        console.print(f"  [yellow]Cannot connect to Flink: {e}[/yellow]")
             else:
-                console.print("  [yellow]No Flink configured[/yellow]")
+                if output_format == "text":
+                    console.print("  [yellow]No Flink configured[/yellow]")
 
         # Check connectors
         if manifest.artifacts.get("connectors"):
-            console.print("\n[cyan]Connectors:[/cyan]")
+            if output_format == "text":
+                console.print("\n[cyan]Connectors:[/cyan]")
             if project.runtime.connect and project.runtime.connect.clusters:
                 try:
                     default_cluster = project.runtime.connect.default
@@ -661,17 +767,51 @@ def status(project_dir: Optional[str]) -> None:
                         cluster_config = project.runtime.connect.clusters[default_cluster]
                         connect_deployer = ConnectDeployer(cluster_config.rest_url)
                         for conn_data in manifest.artifacts["connectors"]:
+                            if not matches_filter(conn_data["name"]):
+                                continue
                             state = connect_deployer.get_connector_state(conn_data["name"])
-                            if state.exists:
-                                console.print(
-                                    f"  [green]{state.status}[/green] {conn_data['name']}"
-                                )
-                            else:
-                                console.print(f"  [red]NOT FOUND[/red] {conn_data['name']}")
+                            conn_status = {
+                                "name": conn_data["name"],
+                                "exists": state.exists,
+                                "status": state.status if state.exists else None,
+                            }
+                            status_data["connectors"].append(conn_status)
+
+                            if output_format == "text":
+                                if state.exists:
+                                    # Color code status
+                                    status_color = "green" if state.status == "RUNNING" else "yellow"
+                                    console.print(
+                                        f"  [{status_color}]{state.status}[/{status_color}] {conn_data['name']}"
+                                    )
+                                else:
+                                    console.print(f"  [red]NOT FOUND[/red] {conn_data['name']}")
                 except Exception as e:
-                    console.print(f"  [yellow]Cannot connect to Connect: {e}[/yellow]")
+                    if output_format == "text":
+                        console.print(f"  [yellow]Cannot connect to Connect: {e}[/yellow]")
             else:
-                console.print("  [yellow]No Connect configured[/yellow]")
+                if output_format == "text":
+                    console.print("  [yellow]No Connect configured[/yellow]")
+
+        # Print summary for text output
+        if output_format == "text":
+            console.print()  # Empty line
+            # Count healthy vs unhealthy
+            healthy = sum(1 for t in status_data["topics"] if t["exists"])
+            missing = sum(1 for t in status_data["topics"] if not t["exists"])
+            running_jobs = sum(1 for j in status_data["flink_jobs"] if j.get("status") == "RUNNING")
+            other_jobs = sum(1 for j in status_data["flink_jobs"] if j.get("status") and j["status"] != "RUNNING")
+
+            summary_parts = []
+            if status_data["topics"]:
+                summary_parts.append(f"Topics: {healthy} OK, {missing} missing")
+            if status_data["flink_jobs"]:
+                summary_parts.append(f"Jobs: {running_jobs} running, {other_jobs} other")
+            if summary_parts:
+                console.print(f"[dim]Summary: {' | '.join(summary_parts)}[/dim]")
+        else:
+            # JSON output
+            console.print(json.dumps(status_data, indent=2))
 
     except (EnvVarError, ParseError) as e:
         error_console.print(f"[red]ERROR[/red]: {e}")

@@ -21,10 +21,12 @@ from streamt.core.dag import DAGBuilder
 from streamt.core.models import (
     MaterializedType,
     DataTest,
+    EventTimeConfig,
     Model,
     Source,
     StreamtProject,
     TopicDefaults,
+    WatermarkStrategy,
 )
 from streamt.core.parser import ProjectParser
 
@@ -526,12 +528,25 @@ WHERE {condition}""")
         bootstrap = self._get_flink_bootstrap_servers()
 
         # Generate columns from source definition
+        column_lines = []
         if source.columns:
-            columns = ",\n    ".join(
-                f"`{col.name}` STRING" for col in source.columns
-            )
+            for col in source.columns:
+                # Determine column type - for event time columns, use TIMESTAMP(3)
+                if source.event_time and col.name == source.event_time.column:
+                    column_lines.append(f"`{col.name}` TIMESTAMP(3)")
+                else:
+                    column_lines.append(f"`{col.name}` STRING")
         else:
-            columns = "`_raw` STRING"
+            column_lines.append("`_raw` STRING")
+
+        # Add watermark if event_time is configured
+        watermark_ddl = ""
+        if source.event_time:
+            watermark_ddl = self._generate_watermark_ddl(source.event_time)
+            if watermark_ddl:
+                column_lines.append(watermark_ddl)
+
+        columns = ",\n    ".join(column_lines)
 
         return f"""CREATE TABLE IF NOT EXISTS {alias} (
     {columns}
@@ -542,6 +557,22 @@ WHERE {condition}""")
     'scan.startup.mode' = 'earliest-offset',
     'format' = 'json'
 );"""
+
+    def _generate_watermark_ddl(self, event_time: EventTimeConfig) -> str:
+        """Generate watermark DDL clause for event time configuration."""
+        column = event_time.column
+
+        if event_time.watermark:
+            if event_time.watermark.strategy == WatermarkStrategy.MONOTONOUSLY_INCREASING:
+                return f"WATERMARK FOR `{column}` AS `{column}`"
+            else:
+                # bounded_out_of_orderness (default)
+                delay_ms = event_time.watermark.max_out_of_orderness_ms or 5000
+                delay_seconds = delay_ms / 1000
+                return f"WATERMARK FOR `{column}` AS `{column}` - INTERVAL '{int(delay_seconds)}' SECOND"
+        else:
+            # Default: 5 seconds out of orderness
+            return f"WATERMARK FOR `{column}` AS `{column}` - INTERVAL '5' SECOND"
 
     def _generate_model_table_ddl(self, model: Model, alias: str, topic_name: str) -> str:
         """Generate Flink CREATE TABLE DDL for a model reference."""
