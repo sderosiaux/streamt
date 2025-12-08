@@ -130,6 +130,26 @@ models:
 4. No physical topic created
 5. Reduces storage costs
 
+### SQL Syntax Limitations
+
+Gateway's VirtualSqlTopicPlugin supports limited SQL syntax for filtering:
+
+| Supported | Not Supported |
+|-----------|---------------|
+| `=`, `<>` | `IN (...)` |
+| `>`, `<`, `>=`, `<=` | `OR` |
+| `REGEXP` | `IS NULL`, `IS NOT NULL` |
+| `AND` | `LIKE`, `BETWEEN` |
+
+**Workaround for IN**: Use `REGEXP` pattern matching:
+```yaml
+# Instead of: WHERE region IN ('US', 'EU')
+# Use:
+sql: |
+  SELECT * FROM {{ source("orders") }}
+  WHERE region REGEXP 'US|EU'
+```
+
 ### Masking Policies
 
 | Policy | Description | Example |

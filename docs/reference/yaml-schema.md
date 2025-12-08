@@ -129,10 +129,6 @@ runtime:
       username: ${GATEWAY_USER}               # Optional (default: admin)
       password: ${GATEWAY_PASSWORD}           # Optional (default: conduktor)
       virtual_cluster: default                # Optional: For multi-tenant setups
-
-    console:                                  # Optional: Conduktor Console
-      url: http://console:8080
-      api_key: ${CONDUKTOR_API_KEY}
 ```
 
 | Field | Type | Required | Description |

@@ -94,6 +94,7 @@ This starts:
 | Flink JobManager | 8082 | Flink dashboard |
 | Flink SQL Gateway | 8084 | SQL submission endpoint |
 | Conduktor Console | 8080 | Kafka UI (admin@localhost / Admin123!) |
+| Conduktor Gateway | 6969, 8888 | Kafka proxy for virtual topics (proxy: 6969, admin: 8888) |
 
 Verify services are running:
 

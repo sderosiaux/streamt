@@ -199,7 +199,15 @@ runtime:
     clusters:
       production:
         rest_url: http://kafka-connect:8083
+
+  # Required for virtual_topic materialization
+  conduktor:
+    gateway:
+      admin_url: http://gateway:8888
+      proxy_bootstrap: gateway:6969
 ```
+
+See the [Gateway Guide](../guides/gateway.md) for virtual topic configuration details.
 
 ## Governance Rules
 
