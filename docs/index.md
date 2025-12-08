@@ -9,7 +9,7 @@ description: Build declarative streaming pipelines with Kafka, Flink, and Connec
 
 **dbt for streaming** — Build declarative streaming pipelines with Kafka, Flink, and Connect
 
-<span class="badge alpha">Alpha</span>
+<span class="badge preview">Preview</span>
 
 [Get Started](getting-started/quickstart.md){ .md-button .md-button--primary }
 [View on GitHub](https://github.com/streamt/streamt){ .md-button }
@@ -246,6 +246,22 @@ pip install "streamt[all]"
 ```
 
 [Full installation guide →](getting-started/installation.md)
+
+---
+
+## What's Coming
+
+We're actively working on:
+
+| Feature | Description |
+|---------|-------------|
+| **Event time configuration** | Explicit watermarks, allowed lateness in YAML |
+| **State TTL** | Prevent unbounded state growth in stateful jobs |
+| **`streamt status --lag`** | Show consumer lag and job health |
+| **Multi-environment** | dev/staging/prod profiles with promotion |
+| **Prometheus metrics** | Export job and topic metrics |
+
+See the [full roadmap](https://github.com/streamt/streamt#roadmap) for more.
 
 ---
 

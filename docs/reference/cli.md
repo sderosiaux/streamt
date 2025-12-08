@@ -474,3 +474,19 @@ if ! streamt status --jobs | grep -q "RUNNING"; then
   exit 1
 fi
 ```
+
+---
+
+## Coming Soon
+
+The following commands and options are planned:
+
+| Command/Option | Description | Status |
+|----------------|-------------|--------|
+| `streamt status --lag` | Show consumer lag for topics | Planned |
+| `streamt status --health` | Health checks with thresholds | Planned |
+| `streamt rollback` | Rollback to previous deployment | Planned |
+| `streamt diff` | Show diff between local and deployed | Planned |
+| `streamt init` | Initialize new project from template | Planned |
+
+See the [roadmap](https://github.com/streamt/streamt#roadmap) for the full list of planned features.

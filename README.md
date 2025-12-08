@@ -309,19 +309,41 @@ streamt/
 
 ### What's Missing for Production
 
-- **Flink savepoint management** — Job upgrades don't preserve state yet
+- **Observability** — No `streamt status` command, metrics, or alerting integration yet
+- **Temporal semantics** — Watermarks, event time, allowed lateness not yet configurable in YAML
+- **State management** — State TTL, savepoint handling for job upgrades
 - **Kubernetes Flink operator** — Currently REST API only
 - **CI/CD templates** — GitHub Actions, etc.
-- **Observability** — Metrics, alerting integration
 
 ## Roadmap
 
-- [x] Schema Registry integration
+### Now (Active Development)
+
+- [ ] `streamt status` command — Show deployed jobs, topics, connectors with health
+- [ ] Event time configuration — `event_time`, `watermark`, `allowed_lateness` in YAML
+- [ ] Improved error messages — Actionable errors with links to docs
+- [x] Streaming fundamentals docs — Teach watermarks, windows, exactly-once
+
+### Soon
+
+- [ ] State TTL configuration — Prevent unbounded state growth
 - [ ] Conduktor Gateway virtual topics
-- [ ] Kubernetes Flink operator support
+- [ ] Multi-environment support — dev/staging/prod profiles
+- [ ] End-to-end tutorials — Windowed aggregations, stream joins, CDC pipelines
+- [ ] Prometheus/OpenTelemetry integration
+
+### Later
+
 - [ ] Flink savepoint handling for upgrades
+- [ ] Kubernetes Flink operator support
+- [ ] Curated connector library — Tested configs for Postgres, Snowflake, S3
 - [ ] CI/CD GitHub Actions templates
+
+### Deferred
+
 - [ ] VS Code extension
+- [ ] Additional streaming substrates (Pulsar, Kinesis)
+- [ ] Cloud/SaaS version
 
 ## License
 
