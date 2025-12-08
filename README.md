@@ -9,7 +9,7 @@
 [![Tests](https://img.shields.io/badge/tests-186%20passed-brightgreen.svg)]()
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)]()
 
-[Documentation](docs/) • [Getting Started](#quick-start) • [Examples](#examples)
+[Documentation](docs/) • [Getting Started](#quick-start) • [Examples](#examples) • [Community](https://conduktor.io/slack)
 
 </div>
 
@@ -331,6 +331,6 @@ Apache 2.0 - See [LICENSE](LICENSE) for details.
 
 <div align="center">
 
-**[Documentation](docs/)** • **[Examples](examples/)** • **[Contributing](CONTRIBUTING.md)**
+**[Documentation](docs/)** • **[Examples](examples/)** • **[Community](https://conduktor.io/slack)** • **[Contributing](CONTRIBUTING.md)**
 
 </div>

@@ -251,6 +251,7 @@ pip install "streamt[all]"
 
 ## Community
 
+- [Slack](https://conduktor.io/slack) — Join the conversation, get help, share ideas
 - [GitHub Discussions](https://github.com/streamt/streamt/discussions) — Ask questions, share ideas
 - [GitHub Issues](https://github.com/streamt/streamt/issues) — Report bugs, request features
 - [Twitter](https://twitter.com/streamtdev) — Follow for updates
