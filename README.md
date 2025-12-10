@@ -316,36 +316,26 @@ streamt/
 
 ## Roadmap
 
-### Now (Active Development)
+### High Value
 
-- [x] `streamt status` command — Show deployed jobs, topics, connectors with health (includes `--lag`, `--format json`, `--filter`)
-- [x] Event time configuration — `event_time`, `watermark`, `allowed_lateness` in YAML
-- [x] Improved error messages — Actionable errors with links to docs, "Did you mean?" suggestions
-- [x] Streaming fundamentals docs — Teach watermarks, windows, exactly-once
-
-### Soon
-
-- [x] State TTL configuration — Prevent unbounded state growth
-- [ ] Conduktor Gateway virtual topics
 - [ ] Multi-environment support — dev/staging/prod profiles
-- [x] End-to-end tutorials — Windowed aggregations, stream joins, CDC pipelines
-- [ ] Prometheus/OpenTelemetry integration
-
-### Later
-
-- [ ] Flink savepoint handling for upgrades
-- [ ] Kubernetes Flink operator support
-- [ ] Curated connector library — Tested configs for Postgres, Snowflake, S3
-- [ ] CI/CD GitHub Actions templates
 - [ ] DLQ support — Dead Letter Queue for failed messages
+- [ ] Flink savepoint handling — Graceful upgrades without data loss
 - [ ] Global credentials/connections — Define Snowflake, S3, etc. once and reference everywhere
+- [ ] Hide implementation details — Simple YAML surface; `advanced:` section for framework control
 
-### Future Vision
+### Operational
 
-- [ ] Hide implementation details — Keep YAML surface simple and opinionated; `advanced:` section for framework control when needed
-- [ ] External app support — Register "blackbox" applications (Java, Go, etc.) with input/output models for lineage tracking
-- [ ] High-level intent mode — "I want X" and streamt builds the entire pipeline automatically
-- [ ] KStreams runtime — Built-in `materialized: kstreams` for users without Flink/Gateway; SQL→KStreams topology conversion (ksqlDB-style); single app handles multiple transforms; K8s integration for auto-scaling and load distribution
+- [ ] Prometheus/OpenTelemetry integration — Metrics and alerting
+- [ ] Kubernetes Flink operator support — Native K8s deployment
+- [ ] CI/CD GitHub Actions templates — Automation for deploy pipelines
+- [ ] Curated connector library — Tested configs for Postgres, Snowflake, S3
+
+### Vision
+
+- [ ] External app support — Register "blackbox" applications (Java, Go) with input/output models for lineage
+- [ ] High-level intent mode — "I want X" and streamt builds the entire pipeline
+- [ ] KStreams runtime — `materialized: kstreams` for users without Flink; SQL→topology conversion via `ksqlDBContext`; K8s auto-scaling
 
 ### Deferred
 
