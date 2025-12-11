@@ -9,7 +9,7 @@
 [![Tests](https://img.shields.io/badge/tests-186%20passed-brightgreen.svg)]()
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)]()
 
-[Documentation](docs/) • [Getting Started](#quick-start) • [Examples](#examples) • [Community](https://conduktor.io/slack)
+[Documentation](docs/) • [Getting Started](#quick-start) • [Examples](#examples) • [Local Development](LOCAL_DEVELOPMENT.md) • [Community](https://conduktor.io/slack)
 
 </div>
 
@@ -244,56 +244,6 @@ tests:
              └─────────────┘           └─────────────┘           └─────────────┘
 ```
 
-## Local Development
-
-Start the infrastructure:
-
-```bash
-docker compose up -d
-```
-
-Services:
-- **Kafka** (KRaft): localhost:9092
-- **Schema Registry**: localhost:8081
-- **Flink UI**: localhost:8082
-- **Connect**: localhost:8083
-- **Conduktor Console**: localhost:8080 (admin@localhost / Admin123!)
-
-Run tests:
-
-```bash
-pytest tests/ -v
-```
-
-## Documentation
-
-```bash
-# Install docs dependencies
-pip install -e ".[docs]"
-
-# Serve locally
-mkdocs serve
-```
-
-## Project Structure
-
-```
-streamt/
-├── src/streamt/
-│   ├── cli.py              # CLI commands
-│   ├── core/
-│   │   ├── models.py       # Pydantic models
-│   │   ├── parser.py       # YAML parser
-│   │   ├── validator.py    # Validation rules
-│   │   └── dag.py          # DAG builder
-│   ├── compiler/           # Artifact generation
-│   ├── deployer/           # Kafka, Flink, Connect
-│   └── testing/            # Test runner
-├── docs/                   # Documentation site
-├── tests/                  # Test suite
-└── examples/               # Example projects
-```
-
 ## Current Status
 
 **Alpha** — Core functionality works, but not production-tested yet.
@@ -355,6 +305,6 @@ Apache 2.0 - See [LICENSE](LICENSE) for details.
 
 <div align="center">
 
-**[Documentation](docs/)** • **[Examples](examples/)** • **[Community](https://conduktor.io/slack)** • **[Contributing](CONTRIBUTING.md)**
+**[Documentation](docs/)** • **[Examples](examples/)** • **[Local Development](LOCAL_DEVELOPMENT.md)** • **[Community](https://conduktor.io/slack)** • **[Contributing](CONTRIBUTING.md)**
 
 </div>
