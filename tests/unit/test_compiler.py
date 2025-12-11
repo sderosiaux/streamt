@@ -797,6 +797,103 @@ class TestContinuousTestCompilation:
             # Should cast the column by name, not by splitting condition
             assert "CAST(`col_a` AS STRING)" in sql_content
 
+    def test_continuous_test_accepted_types_assertion(self):
+        """TC-TEST-004: accepted_types assertion should generate TRY_CAST validation."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test", "version": "1.0.0"},
+                "runtime": {
+                    "kafka": {"bootstrap_servers": "localhost:9092"},
+                    "flink": {
+                        "default": "local",
+                        "clusters": {
+                            "local": {"type": "rest", "rest_url": "http://localhost:8082"}
+                        },
+                    },
+                },
+                "sources": [{"name": "src", "topic": "t1", "columns": [{"name": "amount"}, {"name": "created_at"}]}],
+                "models": [
+                    {
+                        "name": "m1",
+                        "sql": 'SELECT amount, created_at FROM {{ source("src") }}',
+                        "advanced": {"topic": {"name": "t2"}}
+                    }
+                ],
+                "tests": [
+                    {
+                        "name": "type_check",
+                        "model": "m1",
+                        "type": "continuous",
+                        "assertions": [
+                            {"accepted_types": {"types": {"amount": "number", "created_at": "timestamp"}}}
+                        ],
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            output_dir = Path(tmpdir) / "generated"
+            compiler = Compiler(project, output_dir)
+            compiler.compile(dry_run=False)
+
+            sql_content = (output_dir / "flink" / "test_type_check.sql").read_text()
+
+            # Should have TRY_CAST for type validation
+            assert "TRY_CAST(`amount` AS DOUBLE) IS NULL AND `amount` IS NOT NULL" in sql_content
+            assert "TRY_CAST(`created_at` AS TIMESTAMP(3)) IS NULL AND `created_at` IS NOT NULL" in sql_content
+            assert "accepted_types:amount" in sql_content
+            assert "accepted_types:created_at" in sql_content
+
+    def test_continuous_test_custom_sql_assertion(self):
+        """TC-TEST-005: custom_sql assertion should allow user-provided WHERE clause."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test", "version": "1.0.0"},
+                "runtime": {
+                    "kafka": {"bootstrap_servers": "localhost:9092"},
+                    "flink": {
+                        "default": "local",
+                        "clusters": {
+                            "local": {"type": "rest", "rest_url": "http://localhost:8082"}
+                        },
+                    },
+                },
+                "sources": [{"name": "src", "topic": "t1", "columns": [{"name": "balance"}, {"name": "account_id"}]}],
+                "models": [
+                    {
+                        "name": "m1",
+                        "sql": 'SELECT balance, account_id FROM {{ source("src") }}',
+                        "advanced": {"topic": {"name": "t2"}}
+                    }
+                ],
+                "tests": [
+                    {
+                        "name": "custom_check",
+                        "model": "m1",
+                        "type": "continuous",
+                        "assertions": [
+                            {
+                                "custom_sql": {
+                                    "name": "negative_balance",
+                                    "where": "CAST(`balance` AS DOUBLE) < 0",
+                                    "detail_column": "account_id"
+                                }
+                            }
+                        ],
+                    }
+                ],
+            }
+            project = self._create_project(tmpdir, config)
+            output_dir = Path(tmpdir) / "generated"
+            compiler = Compiler(project, output_dir)
+            compiler.compile(dry_run=False)
+
+            sql_content = (output_dir / "flink" / "test_custom_check.sql").read_text()
+
+            # Should have custom WHERE clause
+            assert "WHERE CAST(`balance` AS DOUBLE) < 0" in sql_content
+            assert "custom_sql:negative_balance" in sql_content
+            assert "CAST(`account_id` AS STRING) AS violation_details" in sql_content
+
 
 class TestEventTimeConfiguration:
     """Tests for event time and watermark configuration in Flink SQL."""

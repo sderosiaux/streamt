@@ -99,7 +99,11 @@ streamt test --deploy
 
 ## Assertions Reference
 
-### not_null
+**Status Legend:**
+- ✅ **Implemented** — Available in continuous tests
+- 🚧 **Planned** — Documented but not yet implemented
+
+### not_null ✅
 
 Check that columns are never null:
 
@@ -108,7 +112,7 @@ Check that columns are never null:
     columns: [order_id, customer_id, amount]
 ```
 
-### accepted_values
+### accepted_values ✅
 
 Check that a column only contains allowed values:
 
@@ -118,7 +122,7 @@ Check that a column only contains allowed values:
     values: [pending, confirmed, shipped, delivered, cancelled]
 ```
 
-### accepted_types
+### accepted_types ✅
 
 Validate column data types:
 
@@ -130,7 +134,9 @@ Validate column data types:
       created_at: timestamp
 ```
 
-### range
+**Supported types:** `string`, `number`, `int`, `bigint`, `boolean`, `timestamp`, `date`, `time`
+
+### range ✅
 
 Check numeric values are within bounds:
 
@@ -141,7 +147,7 @@ Check numeric values are within bounds:
     max: 1000000
 ```
 
-### unique_key
+### unique_key 🚧
 
 Validate uniqueness of a key:
 
@@ -159,7 +165,7 @@ Or with tolerance:
     tolerance: 0.01     # Allow 1% duplicates (for exactly-once issues)
 ```
 
-### foreign_key
+### foreign_key 🚧
 
 Check referential integrity:
 
@@ -171,7 +177,7 @@ Check referential integrity:
       column: id
 ```
 
-### max_lag
+### max_lag 🚧
 
 Monitor consumer lag (continuous only):
 
@@ -180,7 +186,7 @@ Monitor consumer lag (continuous only):
     seconds: 300        # 5 minutes max lag
 ```
 
-### throughput
+### throughput 🚧
 
 Monitor message throughput (continuous only):
 
@@ -190,7 +196,7 @@ Monitor message throughput (continuous only):
     max_per_minute: 10000
 ```
 
-### distribution
+### distribution 🚧
 
 Check value distribution:
 
@@ -204,19 +210,18 @@ Check value distribution:
     tolerance: 0.1      # Allow 10% variance
 ```
 
-### custom_sql
+### custom_sql ✅
 
-Write custom validation SQL:
+Write custom validation with a WHERE clause:
 
 ```yaml
 - custom_sql:
     name: positive_balance
-    sql: |
-      SELECT COUNT(*) as violations
-      FROM {{ model }}
-      WHERE balance < 0
-    threshold: 0        # Zero violations allowed
+    where: CAST(`balance` AS DOUBLE) < 0
+    detail_column: account_id
 ```
+
+**Note:** For continuous tests, provide a `where` condition that identifies violations. The `detail_column` specifies which column value to include in violation details.
 
 ## Failure Actions
 

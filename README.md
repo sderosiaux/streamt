@@ -273,8 +273,9 @@ tests:
 ### High Value
 
 - [ ] Multi-environment support — dev/staging/prod profiles
+- [x] Basic test assertions — `not_null`, `accepted_values`, `range`, `accepted_types`, `custom_sql` (continuous tests)
+- [ ] Advanced test assertions — `unique_key`, `foreign_key`, `distribution`, `max_lag`, `throughput` (require windowing/aggregation)
 - [ ] Test failure handlers — `on_failure` actions (alert to Slack/PagerDuty, pause model, route to DLQ, block deployment)
-- [ ] Additional test assertions — `unique_key`, `foreign_key`, `accepted_types`, `distribution`, `max_lag`, `throughput`, `custom_sql`
 - [ ] DLQ support — Dead Letter Queue for failed messages
 - [ ] Flink savepoint handling — Graceful upgrades without data loss
 - [ ] Global credentials/connections — Define Snowflake, S3, etc. once and reference everywhere

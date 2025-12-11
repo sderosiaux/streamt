@@ -374,6 +374,36 @@ class Compiler:
             )
         )
 
+    def _get_type_cast_expression(self, user_type: str) -> str:
+        """Map user-friendly type names to Flink SQL type expressions.
+
+        Args:
+            user_type: User-provided type name (e.g., "string", "number", "timestamp")
+
+        Returns:
+            Flink SQL type expression, or empty string if unsupported
+        """
+        type_mapping = {
+            "string": "STRING",
+            "str": "STRING",
+            "text": "STRING",
+            "number": "DOUBLE",
+            "numeric": "DOUBLE",
+            "double": "DOUBLE",
+            "float": "DOUBLE",
+            "int": "INT",
+            "integer": "INT",
+            "bigint": "BIGINT",
+            "long": "BIGINT",
+            "boolean": "BOOLEAN",
+            "bool": "BOOLEAN",
+            "timestamp": "TIMESTAMP(3)",
+            "datetime": "TIMESTAMP(3)",
+            "date": "DATE",
+            "time": "TIME",
+        }
+        return type_mapping.get(user_type.lower(), "")
+
     def _generate_test_flink_sql(
         self, test: DataTest, source_topic: str, columns: list[str]
     ) -> str:
@@ -448,6 +478,30 @@ class Compiler:
                         violation_conditions.append(
                             (f"CAST(`{col}` AS DOUBLE) > {max_val}", f"range_max:{col}", col)
                         )
+
+            elif assertion_type == "accepted_types":
+                types = config.get("types", {})
+                for col, expected_type in types.items():
+                    if col in columns:
+                        # Generate type validation condition
+                        # We try to cast to the expected type, and if it fails (returns NULL), it's a violation
+                        type_cast = self._get_type_cast_expression(expected_type)
+                        if type_cast:
+                            violation_conditions.append(
+                                (f"TRY_CAST(`{col}` AS {type_cast}) IS NULL AND `{col}` IS NOT NULL",
+                                 f"accepted_types:{col}", col)
+                            )
+
+            elif assertion_type == "custom_sql":
+                # Custom SQL assertion - user provides the WHERE condition
+                name = config.get("name", "custom")
+                where_clause = config.get("where")
+                detail_column = config.get("detail_column", columns[0] if columns else "_raw")
+
+                if where_clause and detail_column in columns:
+                    violation_conditions.append(
+                        (where_clause, f"custom_sql:{name}", detail_column)
+                    )
 
         # Generate INSERT statement for each violation type
         if violation_conditions:
