@@ -257,8 +257,8 @@ tests:
 | Flink job generation | ✅ Works | SQL generation, REST API deployment |
 | Flink job upgrades | ⚠️ Basic | No savepoint handling yet |
 | Connect deployment | ✅ Works | Connector CRUD via REST |
-| Testing framework | ✅ Works | Schema, sample tests |
-| Continuous tests | 🚧 Planned | Flink-based monitoring |
+| Testing framework | ✅ Works | Schema, sample, continuous tests |
+| Continuous tests | ✅ Works | Flink-based monitoring, real-time violations |
 | Multi-environment | 🚧 Planned | Dev/staging/prod profiles |
 
 ### What's Missing for Production
