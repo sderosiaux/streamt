@@ -8,6 +8,8 @@ import pytest
 import sqlglot
 from sqlglot import exp
 
+from streamt.compiler.flink_dialect import FlinkDialect
+
 
 class TestSqlglotFlinkCompatibility:
     """Test sqlglot parsing of Flink-compatible SQL patterns."""
@@ -324,9 +326,11 @@ class TestAdvancedFlinkSQLPatterns:
     - https://docs.confluent.io/cloud/current/flink/reference/functions/json-functions.html
     """
 
-    @pytest.mark.xfail(reason="FOR SYSTEM_TIME AS OF is Flink-specific, not supported by sqlglot")
     def test_temporal_join_for_system_time_as_of(self):
-        """Test temporal join with FOR SYSTEM_TIME AS OF (versioned table join)."""
+        """Test temporal join with FOR SYSTEM_TIME AS OF (versioned table join).
+
+        Now supported via FlinkDialect which adds TIMESTAMP_SNAPSHOT token mapping.
+        """
         sql = """SELECT
             order_id,
             price,
@@ -336,7 +340,7 @@ class TestAdvancedFlinkSQLPatterns:
         FROM orders
         LEFT JOIN currency_rates FOR SYSTEM_TIME AS OF orders.order_time
         ON orders.currency = currency_rates.currency"""
-        parsed = sqlglot.parse_one(sql)
+        parsed = sqlglot.parse_one(sql, dialect=FlinkDialect)
 
         assert isinstance(parsed, exp.Select)
         assert len(parsed.expressions) == 5
@@ -345,14 +349,16 @@ class TestAdvancedFlinkSQLPatterns:
         joins = list(parsed.find_all(exp.Join))
         assert len(joins) == 1
 
-    @pytest.mark.xfail(reason="FOR SYSTEM_TIME AS OF is Flink-specific, not supported by sqlglot")
     def test_lookup_join_with_proctime(self):
-        """Test lookup join using processing time."""
+        """Test lookup join using processing time.
+
+        Now supported via FlinkDialect which adds TIMESTAMP_SNAPSHOT token mapping.
+        """
         sql = """SELECT o.order_id, o.total, c.country, c.zip
         FROM Orders AS o
         JOIN Customers FOR SYSTEM_TIME AS OF o.proc_time AS c
         ON o.customer_id = c.id"""
-        parsed = sqlglot.parse_one(sql)
+        parsed = sqlglot.parse_one(sql, dialect=FlinkDialect)
 
         assert isinstance(parsed, exp.Select)
         joins = list(parsed.find_all(exp.Join))
@@ -371,9 +377,11 @@ class TestAdvancedFlinkSQLPatterns:
         where = parsed.args.get("where")
         assert where is not None
 
-    @pytest.mark.xfail(reason="MATCH_RECOGNIZE is Flink/SQL:2016 CEP syntax, not supported by sqlglot")
     def test_match_recognize_basic_pattern(self):
-        """Test MATCH_RECOGNIZE for basic pattern matching (CEP)."""
+        """Test MATCH_RECOGNIZE for basic pattern matching (CEP).
+
+        Now supported via FlinkDialect which adds MATCH_RECOGNIZE token.
+        """
         sql = """SELECT T.aid, T.bid, T.cid
         FROM MyTable
         MATCH_RECOGNIZE (
@@ -389,15 +397,18 @@ class TestAdvancedFlinkSQLPatterns:
                 B AS name = 'b',
                 C AS name = 'c'
         ) AS T"""
-        parsed = sqlglot.parse_one(sql)
+        parsed = sqlglot.parse_one(sql, dialect=FlinkDialect)
 
         assert isinstance(parsed, exp.Select)
-        # MATCH_RECOGNIZE is parsed as a subquery or special construct
-        assert parsed is not None
+        # MATCH_RECOGNIZE should be in the parsed tree
+        match_recognize = list(parsed.find_all(exp.MatchRecognize))
+        assert len(match_recognize) == 1
 
-    @pytest.mark.xfail(reason="MATCH_RECOGNIZE is Flink/SQL:2016 CEP syntax, not supported by sqlglot")
     def test_match_recognize_with_within_clause(self):
-        """Test MATCH_RECOGNIZE with WITHIN time constraint for price drop detection."""
+        """Test MATCH_RECOGNIZE with WITHIN time constraint for price drop detection.
+
+        Now supported via FlinkDialect which adds MATCH_RECOGNIZE token.
+        """
         sql = """SELECT *
         FROM Ticker
         MATCH_RECOGNIZE(
@@ -413,10 +424,11 @@ class TestAdvancedFlinkSQLPatterns:
                 B AS B.price > A.price - 10,
                 C AS C.price < A.price - 10
         )"""
-        parsed = sqlglot.parse_one(sql)
+        parsed = sqlglot.parse_one(sql, dialect=FlinkDialect)
 
         assert isinstance(parsed, exp.Select)
-        assert parsed is not None
+        match_recognize = list(parsed.find_all(exp.MatchRecognize))
+        assert len(match_recognize) == 1
 
     def test_lag_window_function(self):
         """Test LAG() window function for accessing previous row values."""
@@ -488,9 +500,11 @@ class TestAdvancedFlinkSQLPatterns:
         assert len(parsed.expressions) == 1
         assert parsed is not None
 
-    @pytest.mark.xfail(reason="CUMULATE TVF with TABLE keyword is Flink-specific syntax")
     def test_cumulate_window_tvf(self):
-        """Test CUMULATE windowing table-valued function."""
+        """Test CUMULATE windowing table-valued function.
+
+        Now supported via FlinkDialect which handles TABLE keyword in function args.
+        """
         sql = """SELECT
             window_start,
             window_end,
@@ -500,12 +514,14 @@ class TestAdvancedFlinkSQLPatterns:
             CUMULATE(TABLE orders, DESCRIPTOR(order_time), INTERVAL '1' HOUR, INTERVAL '1' DAY)
         )
         GROUP BY window_start, window_end, user_id"""
-        parsed = sqlglot.parse_one(sql)
+        parsed = sqlglot.parse_one(sql, dialect=FlinkDialect)
 
         assert isinstance(parsed, exp.Select)
         # Should have GROUP BY
         group = parsed.args.get("group")
         assert group is not None
+        # Should have 3 group by expressions
+        assert len(group.expressions) == 3
 
     def test_multiple_window_aggregates(self):
         """Test multiple window aggregates with different partitions."""

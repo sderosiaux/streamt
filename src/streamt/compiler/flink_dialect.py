@@ -6,9 +6,14 @@ and handle Flink-specific SQL patterns including:
 - TUMBLE_START, TUMBLE_END, etc. time attribute functions
 - PROCTIME() for processing time
 - Flink-specific data types
+- MATCH_RECOGNIZE for Complex Event Processing (CEP)
+- FOR SYSTEM_TIME AS OF for temporal/versioned table joins
+- TABLE() TVF with CUMULATE, TUMBLE, HOP windowing functions
 """
 
 from __future__ import annotations
+
+import typing as t
 
 from sqlglot import exp
 from sqlglot.dialects.dialect import Dialect
@@ -21,7 +26,8 @@ class FlinkDialect(Dialect):
     """Custom Flink SQL dialect for sqlglot.
 
     This dialect extends sqlglot's default dialect to support Flink SQL syntax,
-    including windowing functions and Flink-specific types.
+    including windowing functions, MATCH_RECOGNIZE for CEP, temporal joins,
+    and Flink-specific types.
     """
 
     class Tokenizer(Tokenizer):
@@ -52,10 +58,15 @@ class FlinkDialect(Dialect):
             "MAP": TokenType.MAP,
             "ROW": TokenType.STRUCT,
             "MULTISET": TokenType.ARRAY,
+            # MATCH_RECOGNIZE for Complex Event Processing
+            "MATCH_RECOGNIZE": TokenType.MATCH_RECOGNIZE,
+            # Temporal join support (FOR SYSTEM_TIME AS OF)
+            "FOR SYSTEM_TIME": TokenType.TIMESTAMP_SNAPSHOT,
+            "FOR SYSTEM TIME": TokenType.TIMESTAMP_SNAPSHOT,
         }
 
     class Parser(Parser):
-        """Flink SQL parser with custom function support."""
+        """Flink SQL parser with custom function and syntax support."""
 
         FUNCTIONS = {
             **Parser.FUNCTIONS,
@@ -96,7 +107,32 @@ class FlinkDialect(Dialect):
             "ELEMENT": lambda args: exp.Anonymous(this="ELEMENT", expressions=args),
             # Type conversion
             "TRY_CAST": exp.TryCast.from_arg_list,
+            # Flink TVF windowing functions
+            "CUMULATE": lambda args: exp.Anonymous(this="CUMULATE", expressions=args),
+            # DESCRIPTOR for column references in TVFs
+            "DESCRIPTOR": lambda args: exp.Anonymous(this="DESCRIPTOR", expressions=args),
         }
+
+        def _parse_lambda(self, alias: bool = False) -> t.Optional[exp.Expression]:
+            """Override to handle TABLE keyword inside function arguments.
+
+            In Flink SQL, windowing TVFs use syntax like:
+                TUMBLE(TABLE orders, DESCRIPTOR(rowtime), INTERVAL '10' MINUTE)
+
+            The TABLE keyword before a table name needs special handling.
+            """
+            # Check for TABLE keyword (Flink TVF syntax)
+            if self._match(TokenType.TABLE):
+                # Parse the table reference after TABLE keyword
+                table = self._parse_table_parts()
+                if table:
+                    # Wrap in Anonymous to preserve the TABLE keyword context
+                    return exp.Anonymous(this="TABLE", expressions=[table])
+                else:
+                    self._retreat(self._index - 1)
+
+            # Fall back to parent implementation
+            return super()._parse_lambda(alias=alias)
 
     class Generator(Generator):
         """Flink SQL generator with custom type mappings."""
@@ -141,6 +177,10 @@ FLINK_WINDOW_FUNCTIONS = {
     "SESSION_ROWTIME": "TIMESTAMP(3)",
     "SESSION_PROCTIME": "TIMESTAMP(3)",
     "PROCTIME": "TIMESTAMP(3)",
+    # TVF window output columns
+    "window_start": "TIMESTAMP(3)",
+    "window_end": "TIMESTAMP(3)",
+    "window_time": "TIMESTAMP(3)",
 }
 
 
@@ -170,5 +210,5 @@ def is_flink_window_function(func_name: str) -> bool:
         upper_name.startswith("TUMBLE") or
         upper_name.startswith("HOP") or
         upper_name.startswith("SESSION") or
-        upper_name in ("PROCTIME", "ROWTIME")
+        upper_name in ("PROCTIME", "ROWTIME", "CUMULATE")
     )
