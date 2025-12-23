@@ -6,7 +6,8 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-186%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-277%20passed-brightgreen.svg)]()
+[![CI](https://github.com/conduktor/streamt/actions/workflows/ci.yml/badge.svg)](https://github.com/conduktor/streamt/actions)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)]()
 
 [Documentation](docs/) • [Getting Started](#quick-start) • [Examples](#examples) • [Local Development](LOCAL_DEVELOPMENT.md) • [Community](https://conduktor.io/slack)
@@ -57,16 +58,28 @@ streamt compiles your YAML definitions into deployable artifacts:
 
 ## Materializations
 
-Materializations are **automatically inferred** from your SQL:
+Materializations are **automatically inferred** using smart SQL analysis:
 
 | SQL Pattern | Inferred Type | Creates |
 |-------------|---------------|---------|
-| Simple `SELECT` | `topic` | Kafka topic + Flink job |
-| `TUMBLE`, `HOP`, `JOIN` | `flink` | Kafka topic + Flink job |
+| Stateless (`WHERE`, projections) | `virtual_topic` | Gateway rule (if available) |
+| Stateless (no Gateway) | `flink` | Flink job (fallback) |
+| Stateful (`GROUP BY`, `JOIN`, windows) | `flink` | Flink job + Kafka topic |
+| `ML_PREDICT`, `ML_EVALUATE` | `flink` | Confluent Flink job* |
 | `from:` only (no SQL) | `sink` | Kafka Connect connector |
-| Explicit `materialized: virtual_topic` | `virtual_topic` | Conduktor Gateway rule* |
+| Explicit `materialized: virtual_topic` | `virtual_topic` | Conduktor Gateway rule** |
 
-> *`virtual_topic` requires [Conduktor Gateway](https://www.conduktor.io/gateway/) (commercial)
+> *ML functions require Confluent Cloud Flink.
+> **`virtual_topic` requires [Conduktor Gateway](https://www.conduktor.io/gateway/).
+
+### Smart SQL Detection
+
+streamt analyzes your SQL to determine whether it's **stateless** (can run on Gateway) or **stateful** (requires Flink):
+
+- **Stateless**: `WHERE` filters, column projections, `CAST`, `COALESCE`
+- **Stateful**: `GROUP BY`, `JOIN`, `TUMBLE`/`HOP`/`SESSION` windows, `OVER` clauses, `DISTINCT`
+
+If Gateway is configured, stateless SQL automatically uses `virtual_topic`. Otherwise, it falls back to Flink with an informational warning.
 
 ### Simple Surface, Advanced Control
 
@@ -204,6 +217,26 @@ sources:
 
 The `TUMBLE` window automatically triggers Flink materialization.
 
+### ML Inference (Confluent Flink)
+
+```yaml
+- name: fraud_predictions
+  sql: |
+    SELECT
+      transaction_id,
+      amount,
+      ML_PREDICT('FraudModel', amount, merchant_category) as fraud_score
+    FROM {{ ref("transactions") }}
+
+  # Declare ML output schema for type inference
+  ml_outputs:
+    FraudModel:
+      fraud_score: DOUBLE
+      confidence: DOUBLE
+```
+
+`ML_PREDICT` and `ML_EVALUATE` require Confluent Cloud Flink.
+
 ### Export to Warehouse (Auto-Inferred as Sink)
 
 ```yaml
@@ -252,6 +285,8 @@ tests:
 |-----------|--------|-------|
 | YAML parsing & validation | ✅ Stable | Pydantic models, governance rules |
 | DAG & lineage | ✅ Stable | Automatic from SQL refs |
+| SQL parsing & type inference | ✅ Stable | sqlglot-based with custom Flink dialect |
+| Smart materialization | ✅ Stable | Auto-detects stateless vs stateful SQL |
 | Kafka topic deployment | ✅ Stable | Create, update partitions, config |
 | Schema Registry | ✅ Stable | Avro/JSON/Protobuf, compatibility checks |
 | Flink job generation | ✅ Works | SQL generation, REST API deployment |
@@ -259,6 +294,8 @@ tests:
 | Connect deployment | ✅ Works | Connector CRUD via REST |
 | Testing framework | ✅ Works | Schema, sample, continuous tests |
 | Continuous tests | ✅ Works | Flink-based monitoring, real-time violations |
+| ML_PREDICT/ML_EVALUATE | ✅ Works | Confluent Cloud Flink only |
+| CI/CD pipeline | ✅ Works | GitHub Actions for tests and linting |
 | Multi-environment | 🚧 Planned | Dev/staging/prod profiles |
 
 ### What's Missing for Production

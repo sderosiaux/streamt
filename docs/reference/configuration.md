@@ -177,6 +177,22 @@ runtime:
         image: flink:1.18
     ```
 
+=== "Confluent Cloud"
+
+    ```yaml
+    clusters:
+      confluent:
+        type: confluent
+        environment_id: env-abc123
+        compute_pool_id: lfcp-xyz789
+        region: us-west-2
+        api_key: ${CONFLUENT_FLINK_API_KEY}
+        api_secret: ${CONFLUENT_FLINK_API_SECRET}
+    ```
+
+!!! note "ML Functions"
+    `ML_PREDICT` and `ML_EVALUATE` functions are only available on Confluent Cloud Flink clusters. Ensure your cluster is marked as `type: confluent` to enable ML inference validation.
+
 ### Connect
 
 ```yaml

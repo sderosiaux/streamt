@@ -32,10 +32,11 @@ The `materialized` property is automatically inferred from your SQL. Simple tran
 
 ## Materializations
 
-Materializations are **automatically inferred** from your SQL:
+Materializations are **automatically inferred** using smart SQL analysis:
 
-- Simple `SELECT` → **topic** materialization
-- `TUMBLE`, `HOP`, `JOIN` → **flink** materialization
+- **Stateless** SQL (`WHERE`, projections) → **virtual_topic** (if Gateway configured) or **flink** (fallback)
+- **Stateful** SQL (`GROUP BY`, `JOIN`, windows) → **flink** materialization
+- `ML_PREDICT`, `ML_EVALUATE` → **flink** (Confluent Cloud only)
 - `from:` only (no SQL) → **sink** materialization
 
 You can override auto-inference by explicitly specifying `materialized:`.
@@ -125,6 +126,32 @@ Creates a Kafka Connect connector to export data:
 Using `from:` without `sql:` automatically triggers sink materialization.
 
 **Best for:** Exporting to data warehouses, databases, S3
+
+### ML Inference (Confluent Flink)
+
+Use `ML_PREDICT` and `ML_EVALUATE` for real-time ML inference:
+
+```yaml
+- name: fraud_scores
+  sql: |
+    SELECT
+      transaction_id,
+      amount,
+      ML_PREDICT('FraudModel', amount, merchant_id) as prediction
+    FROM {{ ref("transactions") }}
+
+  # Declare ML output schema for proper type inference
+  ml_outputs:
+    FraudModel:
+      fraud_score: DOUBLE
+      confidence: DOUBLE
+```
+
+**Requirements:**
+- Confluent Cloud Flink cluster
+- Model registered in Confluent's model registry
+
+**Best for:** Real-time fraud detection, recommendations, anomaly detection
 
 ## Complete Model Reference
 

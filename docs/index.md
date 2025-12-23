@@ -219,14 +219,14 @@ graph LR
 
 ## Materializations
 
-streamt supports four materialization types:
+Materializations are **automatically inferred** using smart SQL analysis:
 
-| Type | Use Case | Infrastructure |
-|------|----------|----------------|
-| `topic` | Stateless transformations, filtering | Kafka topic |
-| `virtual_topic` | Read-time filtering without storage | Conduktor Gateway |
-| `flink` | Stateful processing, windowing, joins | Flink SQL job |
-| `sink` | Export to external systems | Kafka Connect |
+| Type | Auto-detected When | Infrastructure |
+|------|-------------------|----------------|
+| `virtual_topic` | Stateless SQL + Gateway configured | Conduktor Gateway |
+| `flink` | Stateful SQL (GROUP BY, JOIN, windows) | Flink SQL job |
+| `flink` | ML_PREDICT/ML_EVALUATE | Confluent Flink |
+| `sink` | `from:` without SQL | Kafka Connect |
 
 [Learn more about materializations →](reference/materializations.md)
 
@@ -248,17 +248,25 @@ pip install "streamt[all]"
 
 ---
 
+## Recent Updates
+
+| Feature | Description |
+|---------|-------------|
+| **Smart materialization** | Auto-detects stateless vs stateful SQL for optimal deployment |
+| **ML_PREDICT/ML_EVALUATE** | Confluent Cloud Flink ML inference support |
+| **sqlglot-based parsing** | Robust SQL parsing with custom Flink dialect |
+| **CI/CD pipeline** | GitHub Actions for automated testing |
+
 ## What's Coming
 
 We're actively working on:
 
 | Feature | Description |
 |---------|-------------|
-| **Event time configuration** | Explicit watermarks, allowed lateness in YAML |
-| **State TTL** | Prevent unbounded state growth in stateful jobs |
-| **`streamt status --lag`** | Show consumer lag and job health |
 | **Multi-environment** | dev/staging/prod profiles with promotion |
+| **Flink savepoints** | Graceful job upgrades without data loss |
 | **Prometheus metrics** | Export job and topic metrics |
+| **RisingWave/Materialize** | Alternative streaming SQL backends |
 
 See the [full roadmap](https://github.com/streamt/streamt#roadmap) for more.
 

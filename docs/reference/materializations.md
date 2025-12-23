@@ -13,10 +13,35 @@ Materializations define how models are deployed. Each materialization type creat
 
 | Materialization | Auto-Inferred When | Creates | Use Case |
 |-----------------|---------------------|---------|----------|
-| `topic` | Simple SELECT/WHERE | Kafka topic | Stateless transformations |
-| `virtual_topic` | Has `gateway:` config | Gateway rule | Read-time filtering |
-| `flink` | Has TUMBLE/HOP/SESSION/GROUP BY/JOIN | Flink SQL job | Stateful processing |
+| `virtual_topic` | Stateless SQL + Gateway configured | Gateway rule | Read-time filtering |
+| `flink` | Stateful SQL or stateless without Gateway | Flink SQL job | Stateful processing |
+| `flink` | `ML_PREDICT`/`ML_EVALUATE` functions | Confluent Flink job | ML inference |
 | `sink` | Has `from:` without `sql:` | Connect connector | External exports |
+
+## Smart SQL Detection
+
+streamt uses **sqlglot** to parse your SQL and analyze whether it requires stateful processing:
+
+### Stateless Patterns (can use Gateway)
+
+- `WHERE` clauses with simple conditions
+- Column projections (`SELECT a, b, c`)
+- `CAST` and type conversions
+- `COALESCE`, `CASE WHEN` (without aggregation)
+- Simple function calls
+
+### Stateful Patterns (require Flink)
+
+- `GROUP BY` (aggregations)
+- `JOIN` (stream-to-stream, temporal)
+- `TUMBLE`, `HOP`, `SESSION` windows
+- `OVER` clauses (window functions)
+- `DISTINCT`
+- `LAG`, `LEAD`, `ROW_NUMBER`, `RANK`
+
+### Automatic Fallback
+
+When Gateway is not configured but your SQL is stateless, streamt automatically falls back to Flink with a warning. This ensures your pipeline works regardless of infrastructure availability.
 
 ## Topic
 
@@ -293,6 +318,41 @@ COLLECT(item)  -- Array aggregation
 UPPER(name), LOWER(email)
 SUBSTRING(str, 1, 5)
 CONCAT(first, ' ', last)
+```
+
+#### ML Functions (Confluent Flink Only)
+
+Confluent Cloud Flink supports ML inference directly in SQL:
+
+```sql
+-- Predict using a registered model
+SELECT
+  transaction_id,
+  ML_PREDICT('FraudDetectionModel', amount, merchant_id) as prediction
+FROM transactions
+
+-- Evaluate model performance
+SELECT
+  ML_EVALUATE('FraudDetectionModel', actual_label, predicted_label) as metrics
+FROM predictions
+```
+
+**Requirements:**
+
+- Confluent Cloud Flink cluster (not open-source Flink)
+- Model registered in Confluent's model registry
+- `ml_outputs` field to declare output schema for type inference:
+
+```yaml
+- name: fraud_predictions
+  sql: |
+    SELECT transaction_id, ML_PREDICT('FraudModel', amount) as score
+    FROM {{ ref("transactions") }}
+
+  ml_outputs:
+    FraudModel:
+      score: DOUBLE
+      confidence: DOUBLE
 ```
 
 ### Flink Settings Reference
