@@ -165,6 +165,151 @@ class TestSqlglotFlinkCompatibility:
         assert isinstance(alias_expr.this, exp.Cast)
         assert alias_expr.this.to.sql().upper() == "INT"
 
+    def test_tumble_end_function(self):
+        """Test TUMBLE_END window function parsing."""
+        sql = """SELECT
+            category,
+            TUMBLE_END(event_time, INTERVAL '1' HOUR) as window_end
+        FROM events"""
+        parsed = sqlglot.parse_one(sql)
+
+        # Find TUMBLE_END
+        for expr in parsed.expressions:
+            if isinstance(expr, exp.Alias) and expr.alias == "window_end":
+                inner = expr.this
+                assert isinstance(inner, exp.Anonymous)
+                assert inner.name.upper() == "TUMBLE_END"
+
+    def test_row_number_over_partition(self):
+        """Test ROW_NUMBER() OVER (PARTITION BY ... ORDER BY ...) parsing."""
+        sql = """SELECT
+            event_id,
+            ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY proc_time) as rn
+        FROM events"""
+        parsed = sqlglot.parse_one(sql)
+
+        # Find ROW_NUMBER expression
+        for expr in parsed.expressions:
+            if isinstance(expr, exp.Alias) and expr.alias == "rn":
+                inner = expr.this
+                # ROW_NUMBER with OVER is parsed as Window expression
+                assert isinstance(inner, exp.Window)
+                assert isinstance(inner.this, exp.RowNumber)
+
+    def test_proctime_function(self):
+        """Test PROCTIME() function parsing (Flink-specific)."""
+        sql = "SELECT event_id, PROCTIME() as proc_time FROM events"
+        parsed = sqlglot.parse_one(sql)
+
+        for expr in parsed.expressions:
+            if isinstance(expr, exp.Alias) and expr.alias == "proc_time":
+                inner = expr.this
+                # PROCTIME is parsed as Anonymous function
+                assert isinstance(inner, exp.Anonymous)
+                assert inner.name.upper() == "PROCTIME"
+
+    def test_join_expression(self):
+        """Test JOIN expression parsing."""
+        sql = """SELECT
+            o.order_id,
+            c.name as customer_name
+        FROM orders o
+        JOIN customers c ON o.customer_id = c.id"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert isinstance(parsed, exp.Select)
+        assert len(parsed.expressions) == 2
+
+        # Check that we have a JOIN
+        joins = list(parsed.find_all(exp.Join))
+        assert len(joins) == 1
+
+    def test_min_max_aggregates(self):
+        """Test MIN/MAX aggregate parsing."""
+        sql = "SELECT MIN(amount) as min_amt, MAX(amount) as max_amt FROM orders"
+        parsed = sqlglot.parse_one(sql)
+
+        assert len(parsed.expressions) == 2
+        assert isinstance(parsed.expressions[0].this, exp.Min)
+        assert isinstance(parsed.expressions[1].this, exp.Max)
+
+    def test_arithmetic_expression(self):
+        """Test arithmetic expression parsing."""
+        sql = "SELECT amount * 2 as doubled, amount + tax as total FROM orders"
+        parsed = sqlglot.parse_one(sql)
+
+        assert len(parsed.expressions) == 2
+        assert isinstance(parsed.expressions[0].this, exp.Mul)
+        assert isinstance(parsed.expressions[1].this, exp.Add)
+
+    def test_coalesce_function(self):
+        """Test COALESCE function parsing."""
+        sql = "SELECT COALESCE(name, 'unknown') as safe_name FROM orders"
+        parsed = sqlglot.parse_one(sql)
+
+        alias_expr = parsed.expressions[0]
+        assert isinstance(alias_expr.this, exp.Coalesce)
+
+    def test_hop_window_function(self):
+        """Test HOP window function parsing (Flink sliding window)."""
+        sql = """SELECT
+            category,
+            HOP_START(event_time, INTERVAL '5' MINUTE, INTERVAL '10' MINUTE) as hop_start
+        FROM events"""
+        parsed = sqlglot.parse_one(sql)
+
+        for expr in parsed.expressions:
+            if isinstance(expr, exp.Alias) and expr.alias == "hop_start":
+                inner = expr.this
+                assert isinstance(inner, exp.Anonymous)
+                assert inner.name.upper() == "HOP_START"
+
+    def test_session_window_function(self):
+        """Test SESSION window function parsing (Flink session window)."""
+        sql = """SELECT
+            user_id,
+            SESSION_END(event_time, INTERVAL '30' MINUTE) as session_end
+        FROM events"""
+        parsed = sqlglot.parse_one(sql)
+
+        for expr in parsed.expressions:
+            if isinstance(expr, exp.Alias) and expr.alias == "session_end":
+                inner = expr.this
+                assert isinstance(inner, exp.Anonymous)
+                assert inner.name.upper() == "SESSION_END"
+
+    def test_nested_case_when(self):
+        """Test nested CASE WHEN expressions."""
+        sql = """SELECT
+            CASE
+                WHEN amount >= 1000 THEN 'high'
+                WHEN amount >= 100 THEN 'medium'
+                ELSE 'low'
+            END as tier
+        FROM orders"""
+        parsed = sqlglot.parse_one(sql)
+
+        alias_expr = parsed.expressions[0]
+        assert isinstance(alias_expr.this, exp.Case)
+        # Should have 2 IFs (WHEN clauses)
+        ifs = alias_expr.this.args.get("ifs", [])
+        assert len(ifs) == 2
+
+    def test_group_by_with_tumble(self):
+        """Test GROUP BY with TUMBLE function."""
+        sql = """SELECT
+            category,
+            COUNT(*) as cnt
+        FROM events
+        GROUP BY category, TUMBLE(event_time, INTERVAL '1' HOUR)"""
+        parsed = sqlglot.parse_one(sql)
+
+        # Check GROUP BY exists
+        group = parsed.args.get("group")
+        assert group is not None
+        # Should have 2 group by expressions
+        assert len(group.expressions) == 2
+
 
 class TestTypeInferenceFromSchema:
     """Test type inference with schema context."""
