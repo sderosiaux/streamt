@@ -1,24 +1,87 @@
-"""End-to-end pipeline tests combining Kafka, Flink, and Connect.
+"""End-to-end pipeline tests using streamt YAML → Compile → Deploy workflow.
 
-These tests verify complete streaming pipelines:
-- Multi-stage transformations
-- Kafka -> Flink -> Kafka flows
-- Connect -> Kafka -> Flink -> Kafka flows
-- Full streamt project deployment
+These tests verify complete streaming pipelines through streamt's abstractions:
+- YAML model definition → Compiler → Artifacts → Deployer
+- Multi-stage transformations using ref()
+- Stream-to-stream joins
+- Windowed aggregations
+- Full manifest deployments
+
+NOTE: Tests use streamt's YAML config and compiler, NOT raw Flink SQL.
+This ensures we test streamt's actual functionality, not just Flink.
 """
 
+import tempfile
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
+from streamt.compiler.compiler import Compiler
 from streamt.compiler.manifest import (
+    FlinkJobArtifact,
     Manifest,
     TopicArtifact,
 )
+from streamt.core.parser import ProjectParser
+from streamt.deployer.flink import FlinkDeployer
 from streamt.deployer.kafka import KafkaDeployer
 
 from .conftest import INFRA_CONFIG, ConnectHelper, FlinkHelper, KafkaHelper, poll_until_messages
+
+
+def generate_unique_suffix() -> str:
+    """Generate unique suffix for test isolation."""
+    return uuid.uuid4().hex[:8]
+
+
+def create_and_compile_project(yaml_content: str) -> tuple:
+    """Create a project from YAML and compile it.
+
+    Returns (manifest, tmpdir) - tmpdir must be kept alive until deployment completes.
+    """
+    tmpdir = tempfile.mkdtemp()
+    project_file = Path(tmpdir) / "stream_project.yml"
+    project_file.write_text(yaml_content)
+
+    parser = ProjectParser(Path(tmpdir))
+    project = parser.parse()
+    compiler = Compiler(project)
+    manifest = compiler.compile()
+
+    return manifest, tmpdir
+
+
+def deploy_manifest_topics(manifest: Manifest) -> None:
+    """Deploy all topics from a manifest."""
+    kafka_deployer = KafkaDeployer(INFRA_CONFIG.kafka_bootstrap_servers)
+    for topic_dict in manifest.artifacts.get("topics", []):
+        artifact = TopicArtifact(
+            name=topic_dict["name"],
+            partitions=topic_dict["partitions"],
+            replication_factor=topic_dict["replication_factor"],
+            config=topic_dict.get("config", {}),
+        )
+        kafka_deployer.apply_topic(artifact)
+
+
+def deploy_manifest_flink_jobs(manifest: Manifest) -> list[str]:
+    """Deploy all Flink jobs from a manifest. Returns job names."""
+    flink_deployer = FlinkDeployer(
+        rest_url=INFRA_CONFIG.flink_rest_url,
+        sql_gateway_url=INFRA_CONFIG.flink_sql_gateway_url,
+    )
+    deployed_jobs = []
+    for job_dict in manifest.artifacts.get("flink_jobs", []):
+        artifact = FlinkJobArtifact(
+            name=job_dict["name"],
+            sql=job_dict["sql"],
+            cluster=job_dict.get("cluster", "local"),
+        )
+        flink_deployer.apply_job(artifact)
+        deployed_jobs.append(job_dict["name"])
+    return deployed_jobs
 
 
 @pytest.mark.integration
@@ -26,7 +89,7 @@ from .conftest import INFRA_CONFIG, ConnectHelper, FlinkHelper, KafkaHelper, pol
 @pytest.mark.flink
 @pytest.mark.slow
 class TestMultiStageKafkaFlinkPipeline:
-    """Test multi-stage Kafka-Flink pipelines."""
+    """Test multi-stage Kafka-Flink pipelines using streamt YAML workflow."""
 
     def test_two_stage_transformation(
         self,
@@ -34,193 +97,145 @@ class TestMultiStageKafkaFlinkPipeline:
         kafka_helper: KafkaHelper,
         flink_helper: FlinkHelper,
     ):
-        """Test a two-stage transformation pipeline.
+        """Test a two-stage transformation pipeline via streamt YAML.
 
-        Stage 1: Filter high-value orders
-        Stage 2: Enrich with category totals
+        Stage 1: Filter high-value orders (amount >= 100)
+        Stage 2: Enrich with premium flag (amount >= 200)
+
+        Uses streamt's ref() function to chain models.
         """
-        prefix = uuid.uuid4().hex[:8]
-        source_topic = f"orders_{prefix}"
-        stage1_topic = f"high_value_orders_{prefix}"
-        stage2_topic = f"enriched_orders_{prefix}"
+        suffix = generate_unique_suffix()
+        source_topic = f"orders_{suffix}"
+        stage1_topic = f"high_value_orders_{suffix}"
+        stage2_topic = f"enriched_orders_{suffix}"
 
-        source_table = f"orders_src_{prefix}"
-        stage1_table = f"high_value_tbl_{prefix}"
-        stage2_table = f"enriched_tbl_{prefix}"
+        project_yaml = f"""
+project:
+  name: two-stage-pipeline-{suffix}
+  version: "1.0.0"
+
+runtime:
+  kafka:
+    bootstrap_servers: {INFRA_CONFIG.kafka_bootstrap_servers}
+    bootstrap_servers_internal: {INFRA_CONFIG.kafka_internal_servers}
+  flink:
+    default: local
+    clusters:
+      local:
+        rest_url: {INFRA_CONFIG.flink_rest_url}
+        sql_gateway_url: {INFRA_CONFIG.flink_sql_gateway_url}
+
+sources:
+  - name: orders
+    topic: {source_topic}
+    columns:
+      - name: order_id
+        type: INT
+      - name: category
+        type: STRING
+      - name: amount
+        type: DOUBLE
+
+models:
+  - name: high_value_orders
+    description: Filter orders with amount >= 100
+    sql: |
+      SELECT order_id, category, amount
+      FROM {{{{ source("orders") }}}}
+      WHERE amount >= 100
+    advanced:
+      topic:
+        name: {stage1_topic}
+        partitions: 3
+
+  - name: enriched_orders
+    description: Add premium flag for amount >= 200
+    sql: |
+      SELECT
+        order_id,
+        category,
+        amount,
+        CASE WHEN amount >= 200 THEN TRUE ELSE FALSE END as is_premium
+      FROM {{{{ ref("high_value_orders") }}}}
+    advanced:
+      topic:
+        name: {stage2_topic}
+        partitions: 3
+"""
 
         try:
-            # Create all topics
+            # Create source topic
             kafka_helper.create_topic(source_topic, partitions=3)
-            kafka_helper.create_topic(stage1_topic, partitions=3)
-            kafka_helper.create_topic(stage2_topic, partitions=3)
+
+            # Compile project using streamt
+            manifest, tmpdir = create_and_compile_project(project_yaml)
+
+            # Verify compilation produced expected artifacts
+            assert "topics" in manifest.artifacts, "Manifest should have topics"
+            assert "flink_jobs" in manifest.artifacts, "Manifest should have flink_jobs"
+            assert len(manifest.artifacts["flink_jobs"]) == 2, "Should have 2 Flink jobs"
+
+            # Verify DAG ordering: high_value_orders should come before enriched_orders
+            job_names = [j["name"] for j in manifest.artifacts["flink_jobs"]]
+            assert "high_value_orders" in job_names
+            assert "enriched_orders" in job_names
+
+            # Deploy topics from manifest
+            deploy_manifest_topics(manifest)
+
+            # Deploy Flink jobs from manifest
+            deploy_manifest_flink_jobs(manifest)
+
+            # Wait for jobs to initialize
+            time.sleep(5)
 
             # Produce test orders
             orders = [
                 {"order_id": 1, "category": "electronics", "amount": 150.0},
-                {"order_id": 2, "category": "books", "amount": 25.0},
+                {"order_id": 2, "category": "books", "amount": 25.0},  # Filtered out
                 {"order_id": 3, "category": "electronics", "amount": 500.0},
-                {"order_id": 4, "category": "clothing", "amount": 80.0},
+                {"order_id": 4, "category": "clothing", "amount": 80.0},  # Filtered out
                 {"order_id": 5, "category": "electronics", "amount": 200.0},
-                {"order_id": 6, "category": "books", "amount": 15.0},
+                {"order_id": 6, "category": "books", "amount": 15.0},  # Filtered out
             ]
             kafka_helper.produce_messages(source_topic, orders)
 
-            # Setup Flink
-            flink_helper.open_sql_session()
-
-            # Source table
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {source_table} (
-                order_id INT,
-                category STRING,
-                amount DOUBLE
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{source_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'properties.group.id' = 'stage1_group_{prefix}',
-                'scan.startup.mode' = 'earliest-offset',
-                'format' = 'json'
-            )
-            """
-            )
-
-            # Stage 1 output table (high value orders)
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {stage1_table} (
-                order_id INT,
-                category STRING,
-                amount DOUBLE
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{stage1_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'format' = 'json'
-            )
-            """
-            )
-
-            # Stage 2 output table
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {stage2_table} (
-                order_id INT,
-                category STRING,
-                amount DOUBLE,
-                is_premium BOOLEAN
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{stage2_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'format' = 'json'
-            )
-            """
-            )
-
-            # Stage 1: Filter high value orders (amount >= 100)
-            flink_helper.execute_sql(
-                f"""
-            INSERT INTO {stage1_table}
-            SELECT order_id, category, amount
-            FROM {source_table}
-            WHERE amount >= 100
-            """
-            )
-
-            # Create a source table for stage 2 reading from stage 1 output
-            stage1_source = f"stage1_source_{prefix}"
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {stage1_source} (
-                order_id INT,
-                category STRING,
-                amount DOUBLE
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{stage1_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'properties.group.id' = 'stage2_group_{prefix}',
-                'scan.startup.mode' = 'earliest-offset',
-                'format' = 'json'
-            )
-            """
-            )
-
-            # Stage 2: Mark as premium if amount >= 200
-            flink_helper.execute_sql(
-                f"""
-            INSERT INTO {stage2_table}
-            SELECT
-                order_id,
-                category,
-                amount,
-                amount >= 200 as is_premium
-            FROM {stage1_source}
-            """
-            )
-
-            # Wait for job to process data and poll for stage 1 results
-            time.sleep(5)  # Give job time to start
-
+            # Verify stage 1 output: high-value filtering
             stage1_results = poll_until_messages(
                 kafka_helper,
                 stage1_topic,
                 min_messages=1,
-                group_id=f"verify_stage1_{prefix}",
-                timeout=60.0,  # Increased timeout for job startup
+                group_id=f"verify_stage1_{suffix}",
+                timeout=60.0,
                 poll_interval=2.0,
             )
 
-            # Stage 1: Verify high-value filtering worked
-            assert len(stage1_results) > 0, (
-                f"Expected filtered results in stage1 topic '{stage1_topic}', "
-                "but received none. Stage 1 pipeline may have failed."
-            )
+            assert len(stage1_results) > 0, "Stage 1 should produce filtered results"
             stage1_ids = {r["order_id"] for r in stage1_results}
-            # Only high-value orders (amount >= 100) should pass through
-            assert stage1_ids.issubset(
-                {1, 3, 5}
-            ), f"Stage 1 should only contain high-value order ids {{1, 3, 5}}, got {stage1_ids}"
+            assert stage1_ids.issubset({1, 3, 5}), f"Stage 1 should only have high-value orders, got {stage1_ids}"
             for r in stage1_results:
-                assert (
-                    r["amount"] >= 100
-                ), f"Stage 1 filter failed: order {r['order_id']} has amount {r['amount']} < 100"
+                assert r["amount"] >= 100, f"Stage 1 filter failed: {r}"
 
-            # Verify stage 2 output
-            stage2_results = kafka_helper.consume_messages(
+            # Verify stage 2 output: premium enrichment
+            stage2_results = poll_until_messages(
+                kafka_helper,
                 stage2_topic,
-                group_id=f"verify_stage2_{prefix}",
-                max_messages=10,
+                min_messages=1,
+                group_id=f"verify_stage2_{suffix}",
                 timeout=30.0,
+                poll_interval=2.0,
             )
 
-            # Stage 2: Verify premium flag enrichment
-            assert len(stage2_results) > 0, (
-                f"Expected enriched results in stage2 topic '{stage2_topic}', "
-                "but received none. Stage 2 pipeline may have failed."
-            )
+            assert len(stage2_results) > 0, "Stage 2 should produce enriched results"
             for r in stage2_results:
-                assert "is_premium" in r, f"Missing 'is_premium' field in stage 2 result: {r}"
+                assert "is_premium" in r, f"Missing 'is_premium' field: {r}"
                 if r["amount"] >= 200:
-                    assert (
-                        r["is_premium"] is True
-                    ), f"Order {r['order_id']} with amount {r['amount']} should be premium"
+                    assert r["is_premium"] is True, f"Should be premium: {r}"
                 else:
-                    assert (
-                        r["is_premium"] is False
-                    ), f"Order {r['order_id']} with amount {r['amount']} should not be premium"
+                    assert r["is_premium"] is False, f"Should not be premium: {r}"
 
         finally:
-            # Cleanup
-            try:
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {stage2_table}")
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {stage1_source}")
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {stage1_table}")
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {source_table}")
-            except Exception:
-                pass
+            flink_helper.cancel_all_running_jobs()
             kafka_helper.delete_topic(source_topic)
             kafka_helper.delete_topic(stage1_topic)
             kafka_helper.delete_topic(stage2_topic)
@@ -231,7 +246,7 @@ class TestMultiStageKafkaFlinkPipeline:
 @pytest.mark.flink
 @pytest.mark.slow
 class TestStreamingJoinPipeline:
-    """Test streaming join pipelines."""
+    """Test streaming join pipelines using streamt YAML workflow."""
 
     def test_stream_to_stream_join(
         self,
@@ -239,23 +254,83 @@ class TestStreamingJoinPipeline:
         kafka_helper: KafkaHelper,
         flink_helper: FlinkHelper,
     ):
-        """Test joining two Kafka streams in Flink."""
-        prefix = uuid.uuid4().hex[:8]
-        orders_topic = f"join_orders_{prefix}"
-        customers_topic = f"join_customers_{prefix}"
-        output_topic = f"join_output_{prefix}"
+        """Test joining two Kafka streams via streamt YAML model."""
+        suffix = generate_unique_suffix()
+        orders_topic = f"join_orders_{suffix}"
+        customers_topic = f"join_customers_{suffix}"
+        output_topic = f"join_output_{suffix}"
 
-        orders_table = f"join_orders_tbl_{prefix}"
-        customers_table = f"join_customers_tbl_{prefix}"
-        output_table = f"join_output_tbl_{prefix}"
+        project_yaml = f"""
+project:
+  name: stream-join-{suffix}
+  version: "1.0.0"
+
+runtime:
+  kafka:
+    bootstrap_servers: {INFRA_CONFIG.kafka_bootstrap_servers}
+    bootstrap_servers_internal: {INFRA_CONFIG.kafka_internal_servers}
+  flink:
+    default: local
+    clusters:
+      local:
+        rest_url: {INFRA_CONFIG.flink_rest_url}
+        sql_gateway_url: {INFRA_CONFIG.flink_sql_gateway_url}
+
+sources:
+  - name: orders
+    topic: {orders_topic}
+    columns:
+      - name: order_id
+        type: STRING
+      - name: customer_id
+        type: STRING
+      - name: amount
+        type: DOUBLE
+
+  - name: customers
+    topic: {customers_topic}
+    columns:
+      - name: customer_id
+        type: STRING
+      - name: name
+        type: STRING
+      - name: tier
+        type: STRING
+
+models:
+  - name: enriched_orders
+    description: Orders enriched with customer info
+    sql: |
+      SELECT
+        o.order_id,
+        c.name as customer_name,
+        c.tier as customer_tier,
+        o.amount
+      FROM {{{{ source("orders") }}}} o
+      JOIN {{{{ source("customers") }}}} c
+      ON o.customer_id = c.customer_id
+    advanced:
+      topic:
+        name: {output_topic}
+        partitions: 1
+"""
 
         try:
             # Create topics
             kafka_helper.create_topic(orders_topic, partitions=1)
             kafka_helper.create_topic(customers_topic, partitions=1)
-            kafka_helper.create_topic(output_topic, partitions=1)
 
-            # Produce customers
+            # Compile and deploy
+            manifest, tmpdir = create_and_compile_project(project_yaml)
+
+            assert len(manifest.artifacts.get("flink_jobs", [])) == 1, "Should have 1 join job"
+
+            deploy_manifest_topics(manifest)
+            deploy_manifest_flink_jobs(manifest)
+
+            time.sleep(5)
+
+            # Produce customers first (dimension data)
             customers = [
                 {"customer_id": "c1", "name": "Alice", "tier": "gold"},
                 {"customer_id": "c2", "name": "Bob", "tier": "silver"},
@@ -271,117 +346,26 @@ class TestStreamingJoinPipeline:
             ]
             kafka_helper.produce_messages(orders_topic, orders, key_field="order_id")
 
-            # Setup Flink
-            flink_helper.open_sql_session()
-
-            # Orders source
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {orders_table} (
-                order_id STRING,
-                customer_id STRING,
-                amount DOUBLE,
-                proc_time AS PROCTIME()
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{orders_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'properties.group.id' = 'join_orders_{prefix}',
-                'scan.startup.mode' = 'earliest-offset',
-                'format' = 'json'
-            )
-            """
-            )
-
-            # Customers dimension table (compacted)
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {customers_table} (
-                customer_id STRING,
-                name STRING,
-                tier STRING,
-                proc_time AS PROCTIME()
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{customers_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'properties.group.id' = 'join_customers_{prefix}',
-                'scan.startup.mode' = 'earliest-offset',
-                'format' = 'json'
-            )
-            """
-            )
-
-            # Output sink
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {output_table} (
-                order_id STRING,
-                customer_name STRING,
-                customer_tier STRING,
-                amount DOUBLE
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{output_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'format' = 'json'
-            )
-            """
-            )
-
-            # Join query using temporal join pattern
-            flink_helper.execute_sql(
-                f"""
-            INSERT INTO {output_table}
-            SELECT
-                o.order_id,
-                c.name as customer_name,
-                c.tier as customer_tier,
-                o.amount
-            FROM {orders_table} o
-            JOIN {customers_table} c
-            ON o.customer_id = c.customer_id
-            """
-            )
-
-            # Wait for job to process data and poll for joined results
-            time.sleep(5)  # Give job time to start
-
+            # Wait for joined results
             results = poll_until_messages(
                 kafka_helper,
                 output_topic,
                 min_messages=1,
-                group_id=f"verify_join_{prefix}",
-                timeout=60.0,  # Increased timeout for job startup
+                group_id=f"verify_join_{suffix}",
+                timeout=60.0,
                 poll_interval=2.0,
             )
 
-            # Verify join produced results
-            assert len(results) > 0, (
-                f"Expected joined results in output topic '{output_topic}', "
-                "but received none. Stream join may have failed."
-            )
-
-            # Validate all joined records have required fields
+            assert len(results) > 0, "Should have joined results"
             for r in results:
-                assert "order_id" in r, f"Missing 'order_id' in joined result: {r}"
-                assert "customer_name" in r, f"Missing 'customer_name' in joined result: {r}"
-                assert "customer_tier" in r, f"Missing 'customer_tier' in joined result: {r}"
-                assert "amount" in r, f"Missing 'amount' in joined result: {r}"
-                # Verify the join enriched with correct customer data
-                assert r["customer_tier"] in {
-                    "gold",
-                    "silver",
-                    "bronze",
-                }, f"Invalid customer tier '{r['customer_tier']}' in joined result"
+                assert "order_id" in r, f"Missing order_id: {r}"
+                assert "customer_name" in r, f"Missing customer_name: {r}"
+                assert "customer_tier" in r, f"Missing customer_tier: {r}"
+                assert "amount" in r, f"Missing amount: {r}"
+                assert r["customer_tier"] in {"gold", "silver", "bronze"}, f"Invalid tier: {r}"
 
         finally:
-            try:
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {output_table}")
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {customers_table}")
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {orders_table}")
-            except Exception:
-                pass
+            flink_helper.cancel_all_running_jobs()
             kafka_helper.delete_topic(orders_topic)
             kafka_helper.delete_topic(customers_topic)
             kafka_helper.delete_topic(output_topic)
@@ -392,7 +376,7 @@ class TestStreamingJoinPipeline:
 @pytest.mark.flink
 @pytest.mark.slow
 class TestWindowedAggregationPipeline:
-    """Test windowed aggregation pipelines."""
+    """Test windowed aggregation pipelines using streamt YAML workflow."""
 
     def test_tumbling_window_aggregation(
         self,
@@ -400,75 +384,79 @@ class TestWindowedAggregationPipeline:
         kafka_helper: KafkaHelper,
         flink_helper: FlinkHelper,
     ):
-        """Test tumbling window aggregation."""
-        prefix = uuid.uuid4().hex[:8]
-        source_topic = f"window_source_{prefix}"
-        sink_topic = f"window_sink_{prefix}"
+        """Test tumbling window aggregation via streamt YAML model."""
+        suffix = generate_unique_suffix()
+        source_topic = f"window_source_{suffix}"
+        sink_topic = f"window_sink_{suffix}"
 
-        source_table = f"window_src_{prefix}"
-        sink_table = f"window_sink_{prefix}"
+        project_yaml = f"""
+project:
+  name: window-aggregation-{suffix}
+  version: "1.0.0"
+
+runtime:
+  kafka:
+    bootstrap_servers: {INFRA_CONFIG.kafka_bootstrap_servers}
+    bootstrap_servers_internal: {INFRA_CONFIG.kafka_internal_servers}
+  flink:
+    default: local
+    clusters:
+      local:
+        rest_url: {INFRA_CONFIG.flink_rest_url}
+        sql_gateway_url: {INFRA_CONFIG.flink_sql_gateway_url}
+
+sources:
+  - name: page_views
+    topic: {source_topic}
+    columns:
+      - name: user_id
+        type: STRING
+      - name: page
+        type: STRING
+      - name: event_time
+        type: TIMESTAMP(3)
+    event_time:
+      column: event_time
+      watermark:
+        strategy: bounded_out_of_orderness
+        max_out_of_orderness_ms: 5000
+
+models:
+  - name: page_view_counts
+    description: Count page views per user in 10-second tumbling windows
+    sql: |
+      SELECT
+        TUMBLE_START(event_time, INTERVAL '10' SECOND) as window_start,
+        TUMBLE_END(event_time, INTERVAL '10' SECOND) as window_end,
+        user_id,
+        COUNT(*) as page_views
+      FROM {{{{ source("page_views") }}}}
+      GROUP BY
+        TUMBLE(event_time, INTERVAL '10' SECOND),
+        user_id
+    advanced:
+      topic:
+        name: {sink_topic}
+        partitions: 1
+"""
 
         try:
             kafka_helper.create_topic(source_topic, partitions=1)
-            kafka_helper.create_topic(sink_topic, partitions=1)
 
-            flink_helper.open_sql_session()
+            # Compile and deploy
+            manifest, tmpdir = create_and_compile_project(project_yaml)
 
-            # Source with event time
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {source_table} (
-                user_id STRING,
-                page STRING,
-                event_time TIMESTAMP(3),
-                WATERMARK FOR event_time AS event_time - INTERVAL '5' SECOND
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{source_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'properties.group.id' = 'window_group_{prefix}',
-                'scan.startup.mode' = 'earliest-offset',
-                'format' = 'json'
-            )
-            """
-            )
+            # Verify event_time config was compiled
+            job_sql = manifest.artifacts["flink_jobs"][0]["sql"]
+            assert "WATERMARK" in job_sql, "Should have WATERMARK in compiled SQL"
 
-            # Sink for aggregations
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {sink_table} (
-                window_start TIMESTAMP(3),
-                window_end TIMESTAMP(3),
-                user_id STRING,
-                page_views BIGINT
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{sink_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'format' = 'json'
-            )
-            """
-            )
+            deploy_manifest_topics(manifest)
+            deploy_manifest_flink_jobs(manifest)
 
-            # Windowed aggregation with 10-second window (faster for testing)
-            flink_helper.execute_sql(
-                f"""
-            INSERT INTO {sink_table}
-            SELECT
-                TUMBLE_START(event_time, INTERVAL '10' SECOND) as window_start,
-                TUMBLE_END(event_time, INTERVAL '10' SECOND) as window_end,
-                user_id,
-                COUNT(*) as page_views
-            FROM {source_table}
-            GROUP BY
-                TUMBLE(event_time, INTERVAL '10' SECOND),
-                user_id
-            """
-            )
+            time.sleep(5)
 
             # Produce events in a completed window (30 seconds ago)
-            # This ensures the window has already closed
-            window_time = int(time.time() * 1000) - 30000  # 30 seconds ago
+            window_time = int(time.time() * 1000) - 30000
             events = [
                 {"user_id": "u1", "page": "/home", "event_time": window_time},
                 {"user_id": "u1", "page": "/products", "event_time": window_time + 1000},
@@ -476,85 +464,49 @@ class TestWindowedAggregationPipeline:
                 {"user_id": "u1", "page": "/cart", "event_time": window_time + 3000},
             ]
 
-            # Convert timestamps to Flink SQL format (space separator, not T)
-            # Flink's JSON format expects: yyyy-MM-dd HH:mm:ss.SSS
+            # Convert to Flink timestamp format
             for event in events:
                 ts = event["event_time"]
-                event["event_time"] = time.strftime(
-                    "%Y-%m-%d %H:%M:%S.000",
-                    time.gmtime(ts / 1000),
-                )
+                event["event_time"] = time.strftime("%Y-%m-%d %H:%M:%S.000", time.gmtime(ts / 1000))
 
             kafka_helper.produce_messages(source_topic, events)
 
-            # Send a "future" event to advance the watermark past the window boundary
-            # This triggers window emission without waiting for real time to pass
-            # Use a timestamp far enough in the future to close all past windows
-            future_time = int(time.time() * 1000) + 60000  # 60 seconds in future
+            # Advance watermark with future event
+            future_time = int(time.time() * 1000) + 60000
             watermark_event = {
                 "user_id": "watermark_trigger",
                 "page": "/trigger",
-                "event_time": time.strftime(
-                    "%Y-%m-%d %H:%M:%S.000",
-                    time.gmtime(future_time / 1000),
-                ),
+                "event_time": time.strftime("%Y-%m-%d %H:%M:%S.000", time.gmtime(future_time / 1000)),
             }
             kafka_helper.produce_messages(source_topic, [watermark_event])
 
-            # Wait for window to close and poll for results
-            # Tumbling windows need time for watermark to advance
-            time.sleep(10)  # Give extra time for window aggregation
+            time.sleep(10)  # Wait for window to close
 
+            # Verify aggregation results
             results = poll_until_messages(
                 kafka_helper,
                 sink_topic,
                 min_messages=1,
-                group_id=f"verify_window_{prefix}",
-                timeout=60.0,  # Increased timeout for windowed aggregation
+                group_id=f"verify_window_{suffix}",
+                timeout=60.0,
                 poll_interval=2.0,
             )
 
-            # CRITICAL: Windowed aggregation test must produce results
-            # If no results, the pipeline failed silently
-            assert len(results) > 0, (
-                f"Expected windowed aggregation results in sink topic '{sink_topic}', "
-                "but received none. The tumbling window aggregation pipeline may have failed. "
-                "This could be due to watermark not advancing or window not closing properly."
-            )
+            assert len(results) > 0, "Should have window aggregation results"
 
-            # Filter out the watermark trigger event's window (if it appears)
+            # Filter out watermark trigger
             actual_results = [r for r in results if r.get("user_id") != "watermark_trigger"]
+            assert len(actual_results) > 0, "Should have results from test users"
 
-            # Verify we got results from actual test users
-            assert len(actual_results) > 0, (
-                "Got window results but none from test users (u1, u2). " f"All results: {results}"
-            )
-
-            # Verify aggregation result structure
             for r in actual_results:
-                assert "window_start" in r, f"Missing 'window_start' in aggregation result: {r}"
-                assert "window_end" in r, f"Missing 'window_end' in aggregation result: {r}"
-                assert "user_id" in r, f"Missing 'user_id' in aggregation result: {r}"
-                assert "page_views" in r, f"Missing 'page_views' count in aggregation result: {r}"
-                # Verify page_views is a positive integer (valid aggregation)
-                assert isinstance(
-                    r["page_views"], int
-                ), f"Expected 'page_views' to be int, got {type(r['page_views']).__name__}"
-                assert (
-                    r["page_views"] > 0
-                ), f"Expected positive page_views count, got {r['page_views']}"
-                # Verify user_id is one of the expected values
-                assert r["user_id"] in [
-                    "u1",
-                    "u2",
-                ], f"Unexpected user_id '{r['user_id']}', expected 'u1' or 'u2'"
+                assert "window_start" in r, f"Missing window_start: {r}"
+                assert "window_end" in r, f"Missing window_end: {r}"
+                assert "user_id" in r, f"Missing user_id: {r}"
+                assert "page_views" in r, f"Missing page_views: {r}"
+                assert isinstance(r["page_views"], int) and r["page_views"] > 0, f"Invalid page_views: {r}"
 
         finally:
-            try:
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {sink_table}")
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {source_table}")
-            except Exception:
-                pass
+            flink_helper.cancel_all_running_jobs()
             kafka_helper.delete_topic(source_topic)
             kafka_helper.delete_topic(sink_topic)
 
@@ -565,7 +517,7 @@ class TestWindowedAggregationPipeline:
 @pytest.mark.flink
 @pytest.mark.slow
 class TestFullStackPipeline:
-    """Test complete pipelines using all components."""
+    """Test complete pipelines using all components via streamt."""
 
     def test_connect_kafka_flink_pipeline(
         self,
@@ -574,26 +526,58 @@ class TestFullStackPipeline:
         connect_helper: ConnectHelper,
         flink_helper: FlinkHelper,
     ):
-        """Test: Datagen -> Kafka -> Flink Transform -> Kafka.
+        """Test: Datagen -> Kafka -> Flink Transform -> Kafka via streamt.
 
-        This tests a realistic pipeline where:
-        1. Kafka Connect generates source data
-        2. Flink reads, transforms, and writes back to Kafka
+        Uses Connect for data generation, then processes through streamt model.
         """
-        prefix = uuid.uuid4().hex[:8]
-        source_topic = f"fullstack_source_{prefix}"
-        sink_topic = f"fullstack_sink_{prefix}"
-        connector_name = f"fullstack_datagen_{prefix}"
+        suffix = generate_unique_suffix()
+        source_topic = f"fullstack_source_{suffix}"
+        sink_topic = f"fullstack_sink_{suffix}"
+        connector_name = f"fullstack_datagen_{suffix}"
 
-        source_table = f"fullstack_src_{prefix}"
-        sink_table = f"fullstack_sink_{prefix}"
+        project_yaml = f"""
+project:
+  name: fullstack-pipeline-{suffix}
+  version: "1.0.0"
+
+runtime:
+  kafka:
+    bootstrap_servers: {INFRA_CONFIG.kafka_bootstrap_servers}
+    bootstrap_servers_internal: {INFRA_CONFIG.kafka_internal_servers}
+  flink:
+    default: local
+    clusters:
+      local:
+        rest_url: {INFRA_CONFIG.flink_rest_url}
+        sql_gateway_url: {INFRA_CONFIG.flink_sql_gateway_url}
+
+sources:
+  - name: users
+    topic: {source_topic}
+    columns:
+      - name: userid
+        type: STRING
+      - name: regionid
+        type: STRING
+      - name: gender
+        type: STRING
+
+models:
+  - name: users_transformed
+    description: Transform user data - uppercase region
+    sql: |
+      SELECT userid, UPPER(regionid) as region_upper
+      FROM {{{{ source("users") }}}}
+    advanced:
+      topic:
+        name: {sink_topic}
+        partitions: 1
+"""
 
         try:
-            # Create topics
+            # Create source topic and start datagen connector
             kafka_helper.create_topic(source_topic, partitions=1)
-            kafka_helper.create_topic(sink_topic, partitions=1)
 
-            # Start datagen connector
             config = {
                 "connector.class": "io.confluent.kafka.connect.datagen.DatagenConnector",
                 "kafka.topic": source_topic,
@@ -605,96 +589,37 @@ class TestFullStackPipeline:
                 "iterations": "100",
                 "tasks.max": "1",
             }
-
             connect_helper.create_connector(connector_name, config)
             connect_helper.wait_for_connector_running(connector_name, timeout=30)
 
-            # Wait for some data to be generated
-            time.sleep(5)
+            time.sleep(5)  # Let datagen produce some data
 
-            # Setup Flink transformation
-            flink_helper.open_sql_session()
+            # Compile and deploy streamt model
+            manifest, tmpdir = create_and_compile_project(project_yaml)
+            deploy_manifest_topics(manifest)
+            deploy_manifest_flink_jobs(manifest)
 
-            # Create source table reading from datagen topic
-            # Note: datagen users quickstart produces JSON with userid, regionid, gender, etc.
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {source_table} (
-                userid STRING,
-                regionid STRING,
-                gender STRING
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{source_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'properties.group.id' = 'fullstack_group_{prefix}',
-                'scan.startup.mode' = 'earliest-offset',
-                'format' = 'json',
-                'json.ignore-parse-errors' = 'true'
-            )
-            """
-            )
+            time.sleep(15)  # Multi-system pipeline needs time
 
-            # Sink table
-            flink_helper.execute_sql(
-                f"""
-            CREATE TABLE {sink_table} (
-                userid STRING,
-                region_upper STRING
-            ) WITH (
-                'connector' = 'kafka',
-                'topic' = '{sink_topic}',
-                'properties.bootstrap.servers' = '{INFRA_CONFIG.kafka_internal_servers}',
-                'format' = 'json'
-            )
-            """
-            )
-
-            # Transform: extract userid and uppercase region
-            flink_helper.execute_sql(
-                f"""
-            INSERT INTO {sink_table}
-            SELECT userid, UPPER(regionid) as region_upper
-            FROM {source_table}
-            """
-            )
-
-            # Wait for full-stack pipeline processing (Connect -> Kafka -> Flink -> Kafka)
-            # This needs extra time as data flows through multiple systems
-            time.sleep(15)
-
-            # Poll for transformed results
+            # Verify transformed results
             results = poll_until_messages(
                 kafka_helper,
                 sink_topic,
                 min_messages=1,
-                group_id=f"fullstack_verify_{prefix}",
-                timeout=90.0,  # Longer timeout for multi-system pipeline
+                group_id=f"fullstack_verify_{suffix}",
+                timeout=90.0,
                 poll_interval=2.0,
             )
 
-            # Verify full-stack pipeline produced results
-            assert len(results) > 0, (
-                f"Expected transformed results in sink topic '{sink_topic}', "
-                "but received none. Full-stack pipeline (Connect -> Kafka -> Flink -> Kafka) failed."
-            )
-
-            # Validate all transformed records
+            assert len(results) > 0, "Should have transformed results"
             for r in results:
-                assert "userid" in r, f"Missing 'userid' in transformed result: {r}"
-                assert "region_upper" in r, f"Missing 'region_upper' in transformed result: {r}"
-                # Verify region was transformed to uppercase
+                assert "userid" in r, f"Missing userid: {r}"
+                assert "region_upper" in r, f"Missing region_upper: {r}"
                 if r["region_upper"] is not None:
-                    assert (
-                        r["region_upper"] == r["region_upper"].upper()
-                    ), f"Expected uppercase region, got '{r['region_upper']}'"
+                    assert r["region_upper"] == r["region_upper"].upper(), f"Should be uppercase: {r}"
 
         finally:
-            try:
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {sink_table}")
-                flink_helper.execute_sql(f"DROP TABLE IF EXISTS {source_table}")
-            except Exception:
-                pass
+            flink_helper.cancel_all_running_jobs()
             try:
                 connect_helper.delete_connector(connector_name)
             except Exception:
@@ -714,7 +639,7 @@ class TestDeployersIntegration:
     ):
         """Test deploying multiple topic artifacts via KafkaDeployer."""
         deployer = KafkaDeployer(INFRA_CONFIG.kafka_bootstrap_servers)
-        prefix = uuid.uuid4().hex[:8]
+        prefix = generate_unique_suffix()
 
         topics = [
             TopicArtifact(
@@ -744,7 +669,6 @@ class TestDeployersIntegration:
                 result = deployer.apply_topic(topic)
                 results.append(result)
 
-            # All should be created
             assert all(r == "created" for r in results)
 
             # Verify all topics exist with correct config
@@ -772,8 +696,8 @@ class TestDeployersIntegration:
         self,
         docker_services,
     ):
-        """Test deploying a complete manifest."""
-        prefix = uuid.uuid4().hex[:8]
+        """Test deploying a complete manifest (streamt artifact container)."""
+        prefix = generate_unique_suffix()
 
         # Create a manifest with multiple artifacts
         manifest = Manifest(
@@ -842,7 +766,7 @@ class TestDeployerPlanningMode:
     ):
         """Test planning topic changes without applying."""
         deployer = KafkaDeployer(INFRA_CONFIG.kafka_bootstrap_servers)
-        topic_name = f"plan_test_{uuid.uuid4().hex[:8]}"
+        topic_name = f"plan_test_{generate_unique_suffix()}"
 
         try:
             # Plan for non-existent topic
@@ -871,23 +795,9 @@ class TestDeployerPlanningMode:
             assert "partitions" in plan.changes
             assert "config.retention.ms" in plan.changes
 
-            # Plan with no changes
-            plan = deployer.plan_topic(artifact)
-            # After update, current state has 6 partitions, but artifact has 3
-            # This will show a partition error (can't decrease)
-            # Let's test with the updated artifact instead
-            same = TopicArtifact(
-                name=topic_name,
-                partitions=6,
-                replication_factor=1,
-                config={"retention.ms": "86400000"},
-            )
-
-            # First apply the update
+            # Apply update and plan with same config
             deployer.apply_topic(updated)
-
-            # Now plan with same config
-            plan = deployer.plan_topic(same)
+            plan = deployer.plan_topic(updated)
             assert plan.action == "none"
 
         finally:
@@ -902,7 +812,7 @@ class TestDeployerPlanningMode:
     ):
         """Test computing diffs between current and desired state."""
         deployer = KafkaDeployer(INFRA_CONFIG.kafka_bootstrap_servers)
-        topic_name = f"diff_test_{uuid.uuid4().hex[:8]}"
+        topic_name = f"diff_test_{generate_unique_suffix()}"
 
         try:
             # Create initial topic

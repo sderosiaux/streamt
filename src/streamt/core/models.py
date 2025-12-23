@@ -302,8 +302,10 @@ class ColumnDefinition(BaseModel):
     """Column definition with classification."""
 
     name: str
+    type: Optional[str] = None  # Flink SQL type (STRING, INT, DOUBLE, TIMESTAMP(3), etc.)
     classification: Optional[Classification] = None
     description: Optional[str] = None
+    proctime: bool = False  # If true, this column is a processing time attribute
 
 
 class FreshnessConfig(BaseModel):

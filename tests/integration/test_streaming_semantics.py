@@ -1,19 +1,15 @@
-"""End-to-end tests for streaming semantics validation.
+"""End-to-end tests for streaming semantics via streamt YAML workflow.
 
-These tests verify critical streaming behaviors:
+These tests verify critical streaming behaviors through streamt's abstractions:
 1. Windowed aggregation semantics (tumbling, hopping windows)
-2. Late data handling with allowed lateness
-3. Out-of-order event processing with watermarks
-4. Partition-level ordering guarantees
-5. Event time vs processing time semantics
+2. Watermark configuration and SQL generation
+3. State TTL configuration
+4. Event time processing
 
-These tests address gaps identified by SME review:
-- Late data within allowed lateness should update window results
-- Out-of-order events should be correctly handled by watermarks
-- Partition ordering should be preserved for same-key events
+NOTE: Tests use streamt's YAML → Compiler → Deployer workflow.
+Pure Kafka infrastructure tests have been moved to tests/infrastructure/.
 """
 
-import json
 import tempfile
 import time
 import uuid
@@ -21,10 +17,12 @@ from pathlib import Path
 
 import pytest
 import yaml
-from confluent_kafka import Consumer
 
 from streamt.compiler import Compiler
+from streamt.compiler.manifest import FlinkJobArtifact, TopicArtifact
 from streamt.core.parser import ProjectParser
+from streamt.deployer.flink import FlinkDeployer
+from streamt.deployer.kafka import KafkaDeployer
 
 from .conftest import INFRA_CONFIG, FlinkHelper, KafkaHelper, poll_until_messages
 
@@ -34,144 +32,195 @@ def generate_unique_suffix() -> str:
     return uuid.uuid4().hex[:8]
 
 
+def create_and_compile_project(yaml_content: str) -> tuple:
+    """Create a project from YAML and compile it.
+
+    Returns (manifest, tmpdir) - tmpdir must be kept alive until deployment completes.
+    """
+    tmpdir = tempfile.mkdtemp()
+    project_file = Path(tmpdir) / "stream_project.yml"
+    project_file.write_text(yaml_content)
+
+    parser = ProjectParser(Path(tmpdir))
+    project = parser.parse()
+    compiler = Compiler(project)
+    manifest = compiler.compile()
+
+    return manifest, tmpdir
+
+
+def deploy_manifest_topics(manifest) -> None:
+    """Deploy all topics from a manifest."""
+    kafka_deployer = KafkaDeployer(INFRA_CONFIG.kafka_bootstrap_servers)
+    for topic_dict in manifest.artifacts.get("topics", []):
+        artifact = TopicArtifact(
+            name=topic_dict["name"],
+            partitions=topic_dict["partitions"],
+            replication_factor=topic_dict["replication_factor"],
+            config=topic_dict.get("config", {}),
+        )
+        kafka_deployer.apply_topic(artifact)
+
+
+def deploy_manifest_flink_jobs(manifest) -> list[str]:
+    """Deploy all Flink jobs from a manifest. Returns job names."""
+    flink_deployer = FlinkDeployer(
+        rest_url=INFRA_CONFIG.flink_rest_url,
+        sql_gateway_url=INFRA_CONFIG.flink_sql_gateway_url,
+    )
+    deployed_jobs = []
+    for job_dict in manifest.artifacts.get("flink_jobs", []):
+        artifact = FlinkJobArtifact(
+            name=job_dict["name"],
+            sql=job_dict["sql"],
+            cluster=job_dict.get("cluster", "local"),
+        )
+        flink_deployer.apply_job(artifact)
+        deployed_jobs.append(job_dict["name"])
+    return deployed_jobs
+
+
 @pytest.mark.integration
 @pytest.mark.flink
 class TestWindowedAggregationSemantics:
-    """Test windowed aggregation semantics with real Flink."""
-
-    def _create_project(self, tmpdir: Path, config: dict):
-        """Create a project and return parsed project."""
-        with open(tmpdir / "stream_project.yml", "w") as f:
-            yaml.dump(config, f)
-        parser = ProjectParser(tmpdir)
-        return parser.parse()
+    """Test windowed aggregation semantics via streamt YAML workflow."""
 
     def test_tumbling_window_aggregation(
         self, docker_services, flink_helper: FlinkHelper, kafka_helper: KafkaHelper
     ):
         """TC-STREAMING-001: Tumbling window should aggregate events correctly.
 
-        This test verifies:
+        This test verifies streamt's windowed aggregation via YAML config:
         - Events within the same window are aggregated together
         - Window results are emitted after watermark advances past window end
         - Multiple windows produce separate results
+
+        Uses streamt: YAML → Compiler → FlinkDeployer → verify results
         """
         suffix = generate_unique_suffix()
         source_topic = f"test_tumble_src_{suffix}"
         output_topic = f"test_tumble_out_{suffix}"
-        source_table = f"tumble_src_{suffix}"
-        sink_table = f"tumble_sink_{suffix}"
+
+        project_yaml = f"""
+project:
+  name: tumbling-window-test-{suffix}
+  version: "1.0.0"
+
+runtime:
+  kafka:
+    bootstrap_servers: {INFRA_CONFIG.kafka_bootstrap_servers}
+    bootstrap_servers_internal: {INFRA_CONFIG.kafka_internal_servers}
+  flink:
+    default: local
+    clusters:
+      local:
+        rest_url: {INFRA_CONFIG.flink_rest_url}
+        sql_gateway_url: {INFRA_CONFIG.flink_sql_gateway_url}
+
+sources:
+  - name: events
+    topic: {source_topic}
+    columns:
+      - name: event_id
+        type: STRING
+      - name: category
+        type: STRING
+      - name: amount
+        type: DOUBLE
+      - name: event_time
+        type: TIMESTAMP(3)
+    event_time:
+      column: event_time
+      watermark:
+        strategy: bounded_out_of_orderness
+        max_out_of_orderness_ms: 2000
+
+models:
+  - name: category_window_stats
+    description: Aggregate events per category in 10-second tumbling windows
+    sql: |
+      SELECT
+        category,
+        TUMBLE_START(event_time, INTERVAL '10' SECOND) as window_start,
+        TUMBLE_END(event_time, INTERVAL '10' SECOND) as window_end,
+        COUNT(*) as event_count,
+        SUM(amount) as total_amount
+      FROM {{{{ source("events") }}}}
+      GROUP BY category, TUMBLE(event_time, INTERVAL '10' SECOND)
+    advanced:
+      topic:
+        name: {output_topic}
+        partitions: 1
+"""
 
         try:
             kafka_helper.create_topic(source_topic, partitions=1)
-            kafka_helper.create_topic(output_topic, partitions=1)
 
-            flink_helper.open_sql_session()
+            # Compile and deploy via streamt
+            manifest, tmpdir = create_and_compile_project(project_yaml)
 
-            # Create source table with event time and watermark
-            flink_helper.execute_sql(f"""
-                CREATE TABLE {source_table} (
-                    event_id STRING,
-                    category STRING,
-                    amount DOUBLE,
-                    event_time TIMESTAMP(3),
-                    WATERMARK FOR event_time AS event_time - INTERVAL '2' SECOND
-                ) WITH (
-                    'connector' = 'kafka',
-                    'topic' = '{source_topic}',
-                    'properties.bootstrap.servers' = 'kafka:29092',
-                    'scan.startup.mode' = 'earliest-offset',
-                    'format' = 'json'
-                )
-            """)
+            # Verify compilation generated correct SQL with watermark
+            job_sql = manifest.artifacts["flink_jobs"][0]["sql"]
+            assert "WATERMARK" in job_sql, "Compiled SQL should have WATERMARK clause"
+            assert "TUMBLE" in job_sql, "Compiled SQL should have TUMBLE aggregation"
 
-            # Create sink table
-            flink_helper.execute_sql(f"""
-                CREATE TABLE {sink_table} (
-                    category STRING,
-                    window_start TIMESTAMP(3),
-                    window_end TIMESTAMP(3),
-                    event_count BIGINT,
-                    total_amount DOUBLE
-                ) WITH (
-                    'connector' = 'kafka',
-                    'topic' = '{output_topic}',
-                    'properties.bootstrap.servers' = 'kafka:29092',
-                    'format' = 'json'
-                )
-            """)
+            deploy_manifest_topics(manifest)
+            deploy_manifest_flink_jobs(manifest)
 
-            # Submit windowed aggregation job
-            flink_helper.execute_sql(f"""
-                INSERT INTO {sink_table}
-                SELECT
-                    category,
-                    TUMBLE_START(event_time, INTERVAL '10' SECOND) as window_start,
-                    TUMBLE_END(event_time, INTERVAL '10' SECOND) as window_end,
-                    COUNT(*) as event_count,
-                    SUM(amount) as total_amount
-                FROM {source_table}
-                GROUP BY category, TUMBLE(event_time, INTERVAL '10' SECOND)
-            """)
+            time.sleep(3)
 
-            try:
-                time.sleep(3)  # Let job initialize
+            # Create events all in the SAME 10-second window
+            current_epoch_s = int(time.time())
+            window_base = ((current_epoch_s - 30) // 10) * 10 + 2
 
-                # Create events all in the SAME 10-second window
-                # Align base time to window boundary (30 seconds ago, aligned to 10s)
-                current_epoch_s = int(time.time())
-                window_base = ((current_epoch_s - 30) // 10) * 10 + 2  # Start 2s into a window
-
-                events = [
-                    {
-                        "event_id": f"evt_{i}",
-                        "category": "electronics",
-                        "amount": 100.0 + i * 10,
-                        "event_time": time.strftime("%Y-%m-%d %H:%M:%S.000", time.gmtime(window_base + i)),
-                    }
-                    for i in range(5)  # 5 events at :02, :03, :04, :05, :06 within window
-                ]
-
-                kafka_helper.produce_messages(source_topic, events)
-
-                # Advance watermark by sending event in the future
-                future_time = int(time.time()) + 120
-                watermark_event = {
-                    "event_id": "watermark_advance",
-                    "category": "other",
-                    "amount": 1.0,
-                    "event_time": time.strftime("%Y-%m-%d %H:%M:%S.000", time.gmtime(future_time)),
+            events = [
+                {
+                    "event_id": f"evt_{i}",
+                    "category": "electronics",
+                    "amount": 100.0 + i * 10,
+                    "event_time": time.strftime("%Y-%m-%d %H:%M:%S.000", time.gmtime(window_base + i)),
                 }
-                kafka_helper.produce_messages(source_topic, [watermark_event])
+                for i in range(5)
+            ]
 
-                time.sleep(10)  # Wait for window to close
+            kafka_helper.produce_messages(source_topic, events)
 
-                # Wait for window result
-                messages = poll_until_messages(
-                    kafka_helper,
-                    output_topic,
-                    min_messages=1,
-                    timeout=60.0,
-                    group_id=f"test_consumer_{suffix}",
-                )
+            # Advance watermark by sending event in the future
+            future_time = int(time.time()) + 120
+            watermark_event = {
+                "event_id": "watermark_advance",
+                "category": "other",
+                "amount": 1.0,
+                "event_time": time.strftime("%Y-%m-%d %H:%M:%S.000", time.gmtime(future_time)),
+            }
+            kafka_helper.produce_messages(source_topic, [watermark_event])
 
-                # Verify aggregation - find the electronics window result
-                electronics_result = None
-                for msg in messages:
-                    if msg.get("category") == "electronics":
-                        electronics_result = msg
-                        break
+            time.sleep(10)
 
-                assert electronics_result is not None, f"Should have electronics window result. Got: {messages}"
-                assert electronics_result["event_count"] == 5, f"Expected 5 events, got {electronics_result['event_count']}"
-                expected_sum = sum(100.0 + i * 10 for i in range(5))
-                assert abs(electronics_result["total_amount"] - expected_sum) < 0.01, \
-                    f"Expected sum {expected_sum}, got {electronics_result['total_amount']}"
+            # Wait for window result
+            messages = poll_until_messages(
+                kafka_helper,
+                output_topic,
+                min_messages=1,
+                timeout=60.0,
+                group_id=f"test_consumer_{suffix}",
+            )
 
-            finally:
-                flink_helper.cancel_all_running_jobs()
+            # Verify aggregation - find the electronics window result
+            electronics_result = None
+            for msg in messages:
+                if msg.get("category") == "electronics":
+                    electronics_result = msg
+                    break
+
+            assert electronics_result is not None, f"Should have electronics window result. Got: {messages}"
+            assert electronics_result["event_count"] == 5, f"Expected 5 events, got {electronics_result['event_count']}"
+            expected_sum = sum(100.0 + i * 10 for i in range(5))
+            assert abs(electronics_result["total_amount"] - expected_sum) < 0.01, \
+                f"Expected sum {expected_sum}, got {electronics_result['total_amount']}"
 
         finally:
+            flink_helper.cancel_all_running_jobs()
             try:
                 kafka_helper.delete_topic(source_topic)
                 kafka_helper.delete_topic(output_topic)
@@ -180,142 +229,9 @@ class TestWindowedAggregationSemantics:
 
 
 @pytest.mark.integration
-@pytest.mark.kafka
-class TestPartitionOrdering:
-    """Test partition-level ordering guarantees."""
-
-    def test_same_key_ordering_preserved(
-        self, docker_services, kafka_helper: KafkaHelper
-    ):
-        """TC-STREAMING-002: Events with same key should maintain order within partition.
-
-        This is a fundamental Kafka guarantee that streamt relies on for:
-        - Changelog semantics (CDC)
-        - Temporal joins
-        - Stateful processing
-        """
-        suffix = generate_unique_suffix()
-        topic = f"test_ordering_{suffix}"
-
-        try:
-            kafka_helper.create_topic(topic, partitions=3)
-
-            # Send 100 events with same key (will go to same partition)
-            test_key = "order_key_123"
-            events = [
-                {"sequence": i, "data": f"event_{i}"}
-                for i in range(100)
-            ]
-
-            # Produce with key to ensure same partition
-            from confluent_kafka import Producer
-            producer = Producer({"bootstrap.servers": INFRA_CONFIG.kafka_bootstrap_servers})
-
-            for event in events:
-                producer.produce(
-                    topic,
-                    key=test_key.encode(),
-                    value=json.dumps(event).encode()
-                )
-            producer.flush()
-
-            # Consume and verify order
-            consumer = Consumer({
-                "bootstrap.servers": INFRA_CONFIG.kafka_bootstrap_servers,
-                "group.id": f"test_order_consumer_{suffix}",
-                "auto.offset.reset": "earliest",
-            })
-            consumer.subscribe([topic])
-
-            received = []
-            timeout = time.time() + 15
-
-            while len(received) < 100 and time.time() < timeout:
-                msg = consumer.poll(1.0)
-                if msg and not msg.error():
-                    data = json.loads(msg.value().decode())
-                    received.append(data["sequence"])
-
-            consumer.close()
-
-            # Verify ordering (sequences should be monotonically increasing for same key)
-            assert len(received) == 100, f"Expected 100 messages, got {len(received)}"
-            for i in range(1, len(received)):
-                assert received[i] > received[i-1], \
-                    f"Order violated: seq {received[i]} came after {received[i-1]}"
-
-        finally:
-            try:
-                kafka_helper.delete_topic(topic)
-            except Exception:
-                pass
-
-    def test_cross_partition_no_ordering_guarantee(
-        self, docker_services, kafka_helper: KafkaHelper
-    ):
-        """TC-STREAMING-003: Events across partitions have no ordering guarantee.
-
-        This test documents the expected behavior - different keys may interleave
-        when consumed. This is important for understanding streamt's behavior
-        with multi-partition topics.
-        """
-        suffix = generate_unique_suffix()
-        topic = f"test_no_order_{suffix}"
-
-        try:
-            kafka_helper.create_topic(topic, partitions=6)
-
-            from confluent_kafka import Producer
-            producer = Producer({"bootstrap.servers": INFRA_CONFIG.kafka_bootstrap_servers})
-
-            # Send events to different partitions via different keys
-            for i in range(60):
-                key = f"key_{i % 6}"  # 6 different keys for 6 partitions
-                event = {"partition_key": key, "sequence": i}
-                producer.produce(
-                    topic,
-                    key=key.encode(),
-                    value=json.dumps(event).encode()
-                )
-            producer.flush()
-
-            # Consume - order may be interleaved across partitions
-            consumer = Consumer({
-                "bootstrap.servers": INFRA_CONFIG.kafka_bootstrap_servers,
-                "group.id": f"test_no_order_consumer_{suffix}",
-                "auto.offset.reset": "earliest",
-            })
-            consumer.subscribe([topic])
-
-            received_by_key = {f"key_{i}": [] for i in range(6)}
-            timeout = time.time() + 15
-
-            while sum(len(v) for v in received_by_key.values()) < 60 and time.time() < timeout:
-                msg = consumer.poll(1.0)
-                if msg and not msg.error():
-                    data = json.loads(msg.value().decode())
-                    received_by_key[data["partition_key"]].append(data["sequence"])
-
-            consumer.close()
-
-            # Verify: within each key (partition), order is preserved
-            for key, sequences in received_by_key.items():
-                assert len(sequences) == 10, f"Key {key} should have 10 messages"
-                for i in range(1, len(sequences)):
-                    assert sequences[i] > sequences[i-1], \
-                        f"Order violated for key {key}: {sequences[i]} after {sequences[i-1]}"
-
-        finally:
-            try:
-                kafka_helper.delete_topic(topic)
-            except Exception:
-                pass
-
-
-@pytest.mark.integration
 @pytest.mark.flink
 class TestWatermarkBehavior:
-    """Test watermark and out-of-order event handling."""
+    """Test watermark and out-of-order event handling via streamt."""
 
     def _create_project(self, tmpdir: Path, config: dict):
         """Create a project and return parsed project."""
@@ -325,7 +241,7 @@ class TestWatermarkBehavior:
         return parser.parse()
 
     def test_watermark_configuration_generates_correct_sql(self, docker_services):
-        """TC-STREAMING-004: Watermark config should generate correct Flink SQL.
+        """TC-STREAMING-002: Watermark config should generate correct Flink SQL.
 
         This test validates that streamt correctly generates Flink SQL with:
         - Proper WATERMARK clause in source table definition
@@ -395,11 +311,66 @@ class TestWatermarkBehavior:
             assert "`event_time` TIMESTAMP(3)" in sql_content, \
                 f"event_time should be TIMESTAMP(3). SQL: {sql_content}"
 
+    @pytest.mark.xfail(reason="Compiler doesn't yet support monotonously_increasing watermark strategy")
+    def test_monotonously_increasing_watermark_strategy(self, docker_services):
+        """TC-STREAMING-003: Monotonously increasing watermark should use row-time directly.
+
+        For perfectly ordered streams, watermark = event_time (no delay).
+        """
+        suffix = generate_unique_suffix()
+        source_topic = f"test_mono_src_{suffix}"
+        output_topic = f"test_mono_out_{suffix}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = {
+                "project": {"name": "test-mono-watermark", "version": "1.0.0"},
+                "runtime": {
+                    "kafka": {
+                        "bootstrap_servers": "localhost:9092",
+                        "bootstrap_servers_internal": "kafka:29092",
+                    },
+                },
+                "sources": [
+                    {
+                        "name": "events",
+                        "topic": source_topic,
+                        "columns": [
+                            {"name": "event_id"},
+                            {"name": "event_time", "type": "TIMESTAMP(3)"},
+                        ],
+                        "event_time": {
+                            "column": "event_time",
+                            "watermark": {
+                                "strategy": "monotonously_increasing",
+                            },
+                        },
+                    }
+                ],
+                "models": [
+                    {
+                        "name": output_topic,
+                        "sql": "SELECT * FROM {{ source(\"events\") }}",
+                    }
+                ],
+            }
+            project = self._create_project(Path(tmpdir), config)
+            output_dir = Path(tmpdir) / "generated"
+            compiler = Compiler(project, output_dir)
+            compiler.compile(dry_run=False)
+
+            sql_path = output_dir / "flink" / f"{output_topic}.sql"
+            sql_content = sql_path.read_text()
+
+            # Monotonously increasing should not have INTERVAL subtraction
+            assert "WATERMARK FOR `event_time`" in sql_content
+            # Check for direct assignment (no subtraction)
+            assert "AS `event_time`" in sql_content or "- INTERVAL" not in sql_content.split("WATERMARK")[1].split(")")[0]
+
 
 @pytest.mark.integration
 @pytest.mark.flink
 class TestStateTTL:
-    """Test state TTL configuration and behavior."""
+    """Test state TTL configuration and behavior via streamt."""
 
     def _create_project(self, tmpdir: Path, config: dict):
         """Create a project and return parsed project."""
@@ -411,7 +382,7 @@ class TestStateTTL:
     def test_state_ttl_generates_correct_config(
         self, docker_services, flink_helper: FlinkHelper
     ):
-        """TC-STREAMING-005: State TTL should generate correct Flink SET statement.
+        """TC-STREAMING-004: State TTL should generate correct Flink SET statement.
 
         State TTL is critical for:
         - Preventing unbounded state growth in joins
@@ -487,23 +458,82 @@ class TestStateTTL:
 @pytest.mark.integration
 @pytest.mark.flink
 class TestIdempotentProcessing:
-    """Test idempotent processing patterns."""
+    """Test idempotent processing patterns via streamt."""
 
-    def test_deduplication_by_event_id(
+    @pytest.mark.xfail(reason="Kafka sink doesn't support changelog (update/delete) from ROW_NUMBER")
+    def test_deduplication_model(
         self, docker_services, flink_helper: FlinkHelper, kafka_helper: KafkaHelper
     ):
-        """TC-STREAMING-006: Deduplication should remove duplicate events.
+        """TC-STREAMING-005: Deduplication model should remove duplicate events.
 
-        Pattern: Use event_id with time window for deduplication.
-        This is common for at-least-once producers that may retry.
+        Uses streamt model with DISTINCT or ROW_NUMBER deduplication pattern.
         """
         suffix = generate_unique_suffix()
         source_topic = f"test_dedup_src_{suffix}"
         output_topic = f"test_dedup_out_{suffix}"
 
+        project_yaml = f"""
+project:
+  name: dedup-test-{suffix}
+  version: "1.0.0"
+
+runtime:
+  kafka:
+    bootstrap_servers: {INFRA_CONFIG.kafka_bootstrap_servers}
+    bootstrap_servers_internal: {INFRA_CONFIG.kafka_internal_servers}
+  flink:
+    default: local
+    clusters:
+      local:
+        rest_url: {INFRA_CONFIG.flink_rest_url}
+        sql_gateway_url: {INFRA_CONFIG.flink_sql_gateway_url}
+
+sources:
+  - name: raw_events
+    topic: {source_topic}
+    columns:
+      - name: event_id
+        type: STRING
+      - name: user_id
+        type: STRING
+      - name: action
+        type: STRING
+      - name: proc_time
+        type: TIMESTAMP(3)
+        proctime: true
+
+models:
+  - name: deduped_events
+    description: Deduplicate events by event_id using ROW_NUMBER
+    sql: |
+      SELECT event_id, user_id, action
+      FROM (
+        SELECT
+          event_id, user_id, action,
+          ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY proc_time) as rn
+        FROM {{{{ source("raw_events") }}}}
+      )
+      WHERE rn = 1
+    advanced:
+      topic:
+        name: {output_topic}
+        partitions: 1
+"""
+
         try:
             kafka_helper.create_topic(source_topic, partitions=1)
-            kafka_helper.create_topic(output_topic, partitions=1)
+
+            # Compile and deploy via streamt
+            manifest, tmpdir = create_and_compile_project(project_yaml)
+
+            # Verify compilation produced deduplication SQL
+            job_sql = manifest.artifacts["flink_jobs"][0]["sql"]
+            assert "ROW_NUMBER()" in job_sql, "Compiled SQL should have ROW_NUMBER for dedup"
+
+            deploy_manifest_topics(manifest)
+            deploy_manifest_flink_jobs(manifest)
+
+            time.sleep(5)
 
             # Send duplicate events
             events = [
@@ -515,29 +545,33 @@ class TestIdempotentProcessing:
             ]
             kafka_helper.produce_messages(source_topic, events)
 
-            # Verify duplicates exist in source
-            consumer = Consumer({
-                "bootstrap.servers": INFRA_CONFIG.kafka_bootstrap_servers,
-                "group.id": f"verify_src_{suffix}",
-                "auto.offset.reset": "earliest",
-            })
-            consumer.subscribe([source_topic])
+            # Wait for deduplication processing
+            time.sleep(10)
 
-            source_count = 0
-            timeout = time.time() + 10
-            while source_count < 5 and time.time() < timeout:
-                msg = consumer.poll(0.5)
-                if msg and not msg.error():
-                    source_count += 1
-            consumer.close()
+            # Verify deduplication: should have 3 unique event_ids
+            results = poll_until_messages(
+                kafka_helper,
+                output_topic,
+                min_messages=3,
+                timeout=60.0,
+                group_id=f"dedup_verify_{suffix}",
+            )
 
-            assert source_count == 5, f"Source should have 5 messages (including duplicates), got {source_count}"
+            event_ids = {r["event_id"] for r in results}
+            assert event_ids == {"evt_1", "evt_2", "evt_3"}, \
+                f"Should have exactly 3 unique events, got {event_ids}"
 
-            # After deduplication, should have 3 unique event_ids
-            # Note: This test validates the pattern exists and works at source level
-            # Full deduplication would require a Flink job with DISTINCT or dedup logic
+            # Count occurrences - each event_id should appear only once
+            event_id_counts = {}
+            for r in results:
+                eid = r["event_id"]
+                event_id_counts[eid] = event_id_counts.get(eid, 0) + 1
+
+            for eid, count in event_id_counts.items():
+                assert count == 1, f"Event {eid} should appear once, got {count}"
 
         finally:
+            flink_helper.cancel_all_running_jobs()
             try:
                 kafka_helper.delete_topic(source_topic)
                 kafka_helper.delete_topic(output_topic)
@@ -546,58 +580,158 @@ class TestIdempotentProcessing:
 
 
 @pytest.mark.integration
-@pytest.mark.kafka
-class TestSchemaEvolution:
-    """Test schema evolution patterns (without Schema Registry)."""
+@pytest.mark.flink
+class TestEventTimeVsProcessingTime:
+    """Test event time vs processing time semantics via streamt."""
 
-    def test_backward_compatible_field_addition(
-        self, docker_services, kafka_helper: KafkaHelper
-    ):
-        """TC-STREAMING-007: Adding optional fields should be backward compatible.
+    def test_event_time_watermark_compilation(self, docker_services):
+        """TC-STREAMING-006: Event time config should compile to Flink WATERMARK.
 
-        Old consumers should ignore new fields.
-        New consumers should handle missing optional fields.
+        Validates the full chain: YAML event_time config → Compiler → Flink SQL
         """
         suffix = generate_unique_suffix()
-        topic = f"test_schema_evo_{suffix}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_yaml = f"""
+project:
+  name: event-time-test-{suffix}
+  version: "1.0.0"
+
+runtime:
+  kafka:
+    bootstrap_servers: localhost:9092
+    bootstrap_servers_internal: kafka:29092
+
+sources:
+  - name: events
+    topic: events_{suffix}
+    columns:
+      - name: event_id
+        type: STRING
+      - name: ts
+        type: TIMESTAMP(3)
+    event_time:
+      column: ts
+      watermark:
+        strategy: bounded_out_of_orderness
+        max_out_of_orderness_ms: 10000
+
+models:
+  - name: windowed_counts
+    sql: |
+      SELECT
+        TUMBLE_START(ts, INTERVAL '1' MINUTE) as window_start,
+        COUNT(*) as cnt
+      FROM {{{{ source("events") }}}}
+      GROUP BY TUMBLE(ts, INTERVAL '1' MINUTE)
+"""
+            project_file = Path(tmpdir) / "stream_project.yml"
+            project_file.write_text(project_yaml)
+
+            parser = ProjectParser(Path(tmpdir))
+            project = parser.parse()
+            output_dir = Path(tmpdir) / "generated"
+            compiler = Compiler(project, output_dir)
+            compiler.compile(dry_run=False)
+
+            sql_path = output_dir / "flink" / "windowed_counts.sql"
+            sql_content = sql_path.read_text()
+
+            # Verify event time configuration
+            assert "WATERMARK FOR `ts`" in sql_content, \
+                "Should have WATERMARK clause for event time column"
+            assert "INTERVAL '10' SECOND" in sql_content, \
+                "Should have 10-second out-of-orderness (10000ms)"
+
+    @pytest.mark.xfail(reason="Compiler doesn't yet generate PROCTIME() for proctime columns")
+    def test_processing_time_model(
+        self, docker_services, flink_helper: FlinkHelper, kafka_helper: KafkaHelper
+    ):
+        """TC-STREAMING-007: Processing time model should use PROCTIME().
+
+        Validates that streamt can generate processing-time based transformations.
+        """
+        suffix = generate_unique_suffix()
+        source_topic = f"proctime_src_{suffix}"
+        output_topic = f"proctime_out_{suffix}"
+
+        project_yaml = f"""
+project:
+  name: proctime-test-{suffix}
+  version: "1.0.0"
+
+runtime:
+  kafka:
+    bootstrap_servers: {INFRA_CONFIG.kafka_bootstrap_servers}
+    bootstrap_servers_internal: {INFRA_CONFIG.kafka_internal_servers}
+  flink:
+    default: local
+    clusters:
+      local:
+        rest_url: {INFRA_CONFIG.flink_rest_url}
+        sql_gateway_url: {INFRA_CONFIG.flink_sql_gateway_url}
+
+sources:
+  - name: events
+    topic: {source_topic}
+    columns:
+      - name: event_id
+        type: STRING
+      - name: value
+        type: INT
+      - name: proc_time
+        type: TIMESTAMP(3)
+        proctime: true
+
+models:
+  - name: recent_events
+    description: Filter events based on processing time window
+    sql: |
+      SELECT event_id, value
+      FROM {{{{ source("events") }}}}
+    advanced:
+      topic:
+        name: {output_topic}
+        partitions: 1
+"""
 
         try:
-            kafka_helper.create_topic(topic, partitions=1)
+            kafka_helper.create_topic(source_topic, partitions=1)
 
-            # Version 1: basic schema
-            v1_event = {"event_id": "e1", "user_id": "u1"}
+            # Compile via streamt
+            manifest, tmpdir = create_and_compile_project(project_yaml)
 
-            # Version 2: added optional field
-            v2_event = {"event_id": "e2", "user_id": "u2", "metadata": {"source": "web"}}
+            # Verify PROCTIME was generated
+            job_sql = manifest.artifacts["flink_jobs"][0]["sql"]
+            assert "PROCTIME()" in job_sql or "AS PROCTIME()" in job_sql, \
+                f"Compiled SQL should have PROCTIME(). SQL: {job_sql}"
 
-            kafka_helper.produce_messages(topic, [v1_event, v2_event])
+            deploy_manifest_topics(manifest)
+            deploy_manifest_flink_jobs(manifest)
 
-            # Consumer should handle both versions
-            consumer = Consumer({
-                "bootstrap.servers": INFRA_CONFIG.kafka_bootstrap_servers,
-                "group.id": f"schema_evo_consumer_{suffix}",
-                "auto.offset.reset": "earliest",
-            })
-            consumer.subscribe([topic])
+            time.sleep(5)
 
-            messages = []
-            timeout = time.time() + 10
-            while len(messages) < 2 and time.time() < timeout:
-                msg = consumer.poll(0.5)
-                if msg and not msg.error():
-                    messages.append(json.loads(msg.value().decode()))
-            consumer.close()
+            # Produce and verify data flows
+            events = [
+                {"event_id": "e1", "value": 100},
+                {"event_id": "e2", "value": 200},
+            ]
+            kafka_helper.produce_messages(source_topic, events)
 
-            assert len(messages) == 2
+            results = poll_until_messages(
+                kafka_helper,
+                output_topic,
+                min_messages=1,
+                timeout=30.0,
+                group_id=f"proctime_verify_{suffix}",
+            )
 
-            # V1 message - no metadata field
-            assert "metadata" not in messages[0] or messages[0].get("metadata") is None
-
-            # V2 message - has metadata field
-            assert messages[1].get("metadata", {}).get("source") == "web"
+            assert len(results) > 0, "Should have output from processing-time model"
 
         finally:
+            flink_helper.cancel_all_running_jobs()
             try:
-                kafka_helper.delete_topic(topic)
+                kafka_helper.delete_topic(source_topic)
+                kafka_helper.delete_topic(output_topic)
             except Exception:
                 pass

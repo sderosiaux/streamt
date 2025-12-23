@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Optional
 
 from jinja2 import BaseLoader, Environment
+import sqlglot
+from sqlglot import exp
+
+from streamt.compiler.flink_dialect import FlinkDialect, get_flink_function_type
+
+logger = logging.getLogger(__name__)
 
 from streamt.compiler.manifest import (
     ConnectorArtifact,
@@ -592,9 +599,15 @@ WHERE {condition}""")
         column_lines = []
         if source.columns:
             for col in source.columns:
+                # Handle proctime columns (processing time attribute)
+                if col.proctime:
+                    column_lines.append(f"`{col.name}` AS PROCTIME()")
                 # Determine column type - for event time columns, use TIMESTAMP(3)
-                if source.event_time and col.name == source.event_time.column:
+                elif source.event_time and col.name == source.event_time.column:
                     column_lines.append(f"`{col.name}` TIMESTAMP(3)")
+                # Use type from YAML if specified, otherwise default to STRING
+                elif col.type:
+                    column_lines.append(f"`{col.name}` {col.type}")
                 else:
                     column_lines.append(f"`{col.name}` STRING")
         else:
@@ -669,10 +682,11 @@ WHERE {condition}""")
         """Generate Flink CREATE TABLE DDL for a model reference."""
         bootstrap = self._get_flink_bootstrap_servers()
 
-        # Try to infer columns from the upstream model's SQL SELECT clause
-        columns = self._extract_select_columns(model.sql or "")
-        if columns:
-            columns_ddl = ",\n    ".join(f"`{col}` STRING" for col in columns)
+        # Try to infer columns with types from the upstream model's SQL SELECT clause
+        # Pass the model to enable schema resolution from source definitions
+        columns_with_types = self._extract_select_columns_with_types(model.sql or "", model=model)
+        if columns_with_types:
+            columns_ddl = ",\n    ".join(f"`{col}` {col_type}" for col, col_type in columns_with_types)
         else:
             columns_ddl = "`_raw` STRING"
 
@@ -696,10 +710,11 @@ WHERE {condition}""")
         bootstrap = self._get_flink_bootstrap_servers()
         table_name = self._topic_to_table_name(topic_name)
 
-        # Extract columns from SELECT clause
-        columns = self._extract_select_columns(model.sql or "")
-        if columns:
-            columns_ddl = ",\n    ".join(f"`{col}` STRING" for col in columns)
+        # Extract columns with inferred types from SELECT clause
+        # Pass the model to enable schema resolution from source definitions
+        columns_with_types = self._extract_select_columns_with_types(model.sql or "", model=model)
+        if columns_with_types:
+            columns_ddl = ",\n    ".join(f"`{col}` {col_type}" for col, col_type in columns_with_types)
         else:
             columns_ddl = "`_raw` STRING"
 
@@ -714,6 +729,185 @@ WHERE {condition}""")
 
     def _extract_select_columns(self, sql: str) -> list[str]:
         """Extract column names from SELECT clause."""
+        return [col for col, _ in self._extract_select_columns_with_types(sql)]
+
+    def _build_source_schema(self, model: Model) -> dict[str, str]:
+        """Build a schema dictionary from model dependencies.
+
+        Returns dict mapping column_name → Flink SQL type.
+        """
+        schema: dict[str, str] = {}
+        dependencies = self._get_model_dependencies(model)
+
+        for dep_name, dep_type in dependencies:
+            if dep_type == "source":
+                source = self.project.get_source(dep_name)
+                if source and source.columns:
+                    for col in source.columns:
+                        # Use the type from YAML, or default based on context
+                        if col.proctime:
+                            schema[col.name] = "TIMESTAMP_LTZ(3)"
+                        elif source.event_time and col.name == source.event_time.column:
+                            schema[col.name] = "TIMESTAMP(3)"
+                        elif col.type:
+                            schema[col.name] = col.type
+                        else:
+                            schema[col.name] = "STRING"
+            else:
+                # For model references, recursively build schema from upstream model
+                dep_model = self.project.get_model(dep_name)
+                if dep_model and dep_model.sql:
+                    # Recursively build schema for the upstream model first
+                    upstream_schema = self._build_source_schema(dep_model)
+                    # Now extract column types using the upstream schema context
+                    dep_columns = self._extract_select_columns_with_types(
+                        dep_model.sql, schema_context=upstream_schema
+                    )
+                    for col_name, col_type in dep_columns:
+                        schema[col_name] = col_type
+
+        return schema
+
+    def _extract_select_columns_with_types(
+        self, sql: str, schema_context: Optional[dict[str, str]] = None, model: Optional[Model] = None
+    ) -> list[tuple[str, str]]:
+        """Extract column names and infer types from SELECT clause using sqlglot.
+
+        Args:
+            sql: The SQL query to parse
+            schema_context: Optional pre-built schema context
+            model: Optional model to build schema context from
+
+        Returns list of (column_name, flink_type) tuples.
+        """
+        # Build schema context if not provided
+        if schema_context is None and model is not None:
+            schema_context = self._build_source_schema(model)
+        elif schema_context is None:
+            schema_context = {}
+
+        # Clean Jinja templates for parsing (replace with valid identifiers)
+        clean_sql = re.sub(r'\{\{\s*source\s*\(\s*["\'](\w+)["\']\s*\)\s*\}\}', r'\1', sql)
+        clean_sql = re.sub(r'\{\{\s*ref\s*\(\s*["\'](\w+)["\']\s*\)\s*\}\}', r'\1', clean_sql)
+
+        try:
+            # Parse SQL with sqlglot (using default dialect - Flink isn't supported)
+            parsed = sqlglot.parse_one(clean_sql)
+            if not isinstance(parsed, exp.Select):
+                # Might be wrapped in other statements
+                select = parsed.find(exp.Select)
+                if not select:
+                    return []
+                parsed = select
+
+            columns = []
+            for expr in parsed.expressions:
+                col_name = self._get_expression_alias(expr)
+                col_type = self._infer_expression_type(expr, schema_context)
+                if col_name:
+                    columns.append((col_name, col_type))
+
+            return columns
+
+        except Exception as e:
+            logger.debug(f"sqlglot parse failed, falling back to regex: {e}")
+            # Fallback to regex-based extraction
+            return self._extract_select_columns_with_types_regex(sql, schema_context)
+
+    def _get_expression_alias(self, expr: exp.Expression) -> Optional[str]:
+        """Get the output column name for an expression."""
+        # If it has an alias, use that
+        if isinstance(expr, exp.Alias):
+            return expr.alias
+        # If it's a column reference, use the column name
+        if isinstance(expr, exp.Column):
+            return expr.name
+        # For other expressions without aliases, this is invalid SQL
+        return None
+
+    def _infer_expression_type(self, expr: exp.Expression, schema: dict[str, str]) -> str:
+        """Infer Flink SQL type from a sqlglot expression.
+
+        Uses the schema context to resolve column reference types.
+        """
+        # Unwrap alias to get the actual expression
+        if isinstance(expr, exp.Alias):
+            expr = expr.this
+
+        # Column reference - look up in schema
+        if isinstance(expr, exp.Column):
+            col_name = expr.name
+            return schema.get(col_name, "STRING")
+
+        # Aggregate functions
+        if isinstance(expr, exp.Count):
+            return "BIGINT"
+        if isinstance(expr, (exp.Sum, exp.Avg)):
+            return "DOUBLE"
+        if isinstance(expr, (exp.Min, exp.Max)):
+            # Try to infer from the argument
+            if expr.this and isinstance(expr.this, exp.Column):
+                return schema.get(expr.this.name, "DOUBLE")
+            return "DOUBLE"
+
+        # Case expression - check if boolean
+        if isinstance(expr, exp.Case):
+            # Check if any THEN clause returns TRUE/FALSE
+            for when in expr.args.get("ifs", []):
+                then_expr = when.args.get("true")
+                if isinstance(then_expr, exp.Boolean):
+                    return "BOOLEAN"
+            return "STRING"
+
+        # String functions
+        if isinstance(expr, (exp.Upper, exp.Lower, exp.Concat, exp.Substring, exp.Trim)):
+            return "STRING"
+
+        # Numeric literals
+        if isinstance(expr, exp.Literal):
+            if expr.is_int:
+                return "BIGINT"
+            if expr.is_number:
+                return "DOUBLE"
+            if expr.is_string:
+                return "STRING"
+
+        # Boolean literals and comparisons
+        if isinstance(expr, exp.Boolean):
+            return "BOOLEAN"
+        if isinstance(expr, (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.And, exp.Or, exp.Not)):
+            return "BOOLEAN"
+
+        # Anonymous functions (like TUMBLE_START, PROCTIME, etc.)
+        if isinstance(expr, exp.Anonymous):
+            func_name = expr.name.upper()
+            # Check Flink-specific window functions first
+            flink_type = get_flink_function_type(func_name)
+            if flink_type:
+                return flink_type
+            # String functions
+            if func_name in ("UPPER", "LOWER", "CONCAT", "SUBSTRING", "TRIM"):
+                return "STRING"
+            # Window boundaries
+            if func_name in ("WINDOW_START", "WINDOW_END"):
+                return "TIMESTAMP(3)"
+
+        # CurrentTimestamp
+        if isinstance(expr, exp.CurrentTimestamp):
+            return "TIMESTAMP(3)"
+
+        # Cast - use the target type
+        if isinstance(expr, exp.Cast):
+            target_type = expr.to.sql().upper()
+            return target_type
+
+        # Default to STRING for unknown expressions
+        return "STRING"
+
+    def _extract_select_columns_with_types_regex(
+        self, sql: str, schema: dict[str, str]
+    ) -> list[tuple[str, str]]:
+        """Fallback regex-based extraction when sqlglot fails."""
         # Remove Jinja templates first
         clean_sql = re.sub(r'\{\{.*?\}\}', 'placeholder', sql)
 
@@ -729,21 +923,99 @@ WHERE {condition}""")
             return []
 
         columns = []
-        for part in select_clause.split(','):
+        parts = self._split_select_columns(select_clause)
+
+        for part in parts:
             part = part.strip()
-            # Handle "expr AS alias" - take the alias
+            column_name = None
+            column_type = "STRING"
+
             if ' AS ' in part.upper():
                 alias_match = re.search(r'\s+AS\s+[`"]?(\w+)[`"]?\s*$', part, re.IGNORECASE)
                 if alias_match:
-                    columns.append(alias_match.group(1))
-                    continue
+                    column_name = alias_match.group(1)
+                    expr = part[:part.upper().rfind(' AS ')].strip()
+                    column_type = self._infer_flink_type_regex(expr, schema)
+            else:
+                col_match = re.match(r'^[`"]?(\w+)[`"]?$', part)
+                if col_match:
+                    column_name = col_match.group(1)
+                    column_type = schema.get(column_name, "STRING")
 
-            # Handle simple column reference (possibly with backticks)
-            col_match = re.match(r'^[`"]?(\w+)[`"]?$', part)
-            if col_match:
-                columns.append(col_match.group(1))
+            if column_name:
+                columns.append((column_name, column_type))
 
         return columns
+
+    def _split_select_columns(self, select_clause: str) -> list[str]:
+        """Split SELECT clause into columns, respecting nested parentheses."""
+        parts = []
+        current = []
+        depth = 0
+
+        for char in select_clause:
+            if char == '(':
+                depth += 1
+                current.append(char)
+            elif char == ')':
+                depth -= 1
+                current.append(char)
+            elif char == ',' and depth == 0:
+                parts.append(''.join(current).strip())
+                current = []
+            else:
+                current.append(char)
+
+        if current:
+            parts.append(''.join(current).strip())
+
+        return parts
+
+    def _infer_flink_type_regex(self, expr: str, schema: dict[str, str]) -> str:
+        """Infer Flink SQL type from an expression using regex (fallback)."""
+        expr_upper = expr.upper().strip()
+
+        # Boolean: CASE WHEN with TRUE/FALSE
+        if 'CASE' in expr_upper and ('THEN TRUE' in expr_upper or 'THEN FALSE' in expr_upper):
+            return "BOOLEAN"
+
+        # Aggregate functions that return BIGINT
+        if re.match(r'^COUNT\s*\(', expr_upper):
+            return "BIGINT"
+
+        # Aggregate functions that return DOUBLE
+        if re.match(r'^(SUM|AVG)\s*\(', expr_upper):
+            return "DOUBLE"
+
+        # MIN/MAX preserve type, but default to DOUBLE for numeric aggregates
+        if re.match(r'^(MIN|MAX)\s*\(', expr_upper):
+            return "DOUBLE"
+
+        # Window functions that return TIMESTAMP
+        if re.match(r'^(TUMBLE_START|TUMBLE_END|WINDOW_START|WINDOW_END|HOP_START|HOP_END)\s*\(', expr_upper):
+            return "TIMESTAMP(3)"
+
+        # String functions
+        if re.match(r'^(UPPER|LOWER|CONCAT|SUBSTRING|TRIM|LTRIM|RTRIM|REPLACE|REGEXP_REPLACE)\s*\(', expr_upper):
+            return "STRING"
+
+        # PROCTIME()
+        if expr_upper.startswith('PROCTIME('):
+            return "TIMESTAMP_LTZ(3)"
+
+        # Numeric literals
+        if re.match(r'^-?\d+$', expr.strip()):
+            return "BIGINT"
+        if re.match(r'^-?\d+\.\d*$', expr.strip()):
+            return "DOUBLE"
+
+        # Simple column reference - look up in schema
+        col_match = re.match(r'^[`"]?(\w+)[`"]?$', expr.strip())
+        if col_match:
+            return schema.get(col_match.group(1), "STRING")
+
+        # Default to STRING for unknown expressions
+        return "STRING"
 
     def _transform_sql(self, sql: str) -> str:
         """Transform Jinja SQL to plain SQL."""
@@ -845,13 +1117,20 @@ WHERE {condition}""")
         """Get model dependencies as (name, type) tuples."""
         dependencies = []
 
-        if model.sql and self.parser:
-            sources, refs = self.parser.extract_refs_from_sql(model.sql)
+        if model.sql:
+            # Try using parser if available, otherwise extract directly with regex
+            if self.parser:
+                sources, refs = self.parser.extract_refs_from_sql(model.sql)
+            else:
+                # Fallback: extract refs directly from SQL using regex
+                sources, refs = self._extract_refs_from_sql(model.sql)
+
             for source_name in sources:
                 dependencies.append((source_name, "source"))
             for ref_name in refs:
                 dependencies.append((ref_name, "model"))
-        elif model.from_:
+
+        if model.from_:
             for from_ref in model.from_:
                 if from_ref.source:
                     dependencies.append((from_ref.source, "source"))
@@ -859,6 +1138,26 @@ WHERE {condition}""")
                     dependencies.append((from_ref.ref, "model"))
 
         return dependencies
+
+    def _extract_refs_from_sql(self, sql: str) -> tuple[list[str], list[str]]:
+        """Extract source and ref names from SQL using regex.
+
+        This is a fallback when parser is not available.
+        """
+        sources = []
+        refs = []
+
+        # Match {{ source('name') }} patterns
+        source_pattern = r"\{\{\s*source\s*\(\s*['\"](\w+)['\"]\s*\)\s*\}\}"
+        for match in re.finditer(source_pattern, sql):
+            sources.append(match.group(1))
+
+        # Match {{ ref('name') }} patterns
+        ref_pattern = r"\{\{\s*ref\s*\(\s*['\"](\w+)['\"]\s*\)\s*\}\}"
+        for match in re.finditer(ref_pattern, sql):
+            refs.append(match.group(1))
+
+        return sources, refs
 
     def _extract_where_clause(self, sql: str) -> Optional[str]:
         """Extract WHERE clause from SQL."""

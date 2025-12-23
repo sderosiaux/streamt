@@ -334,10 +334,16 @@ class KafkaDeployer:
 
         # Create a temporary consumer to get committed offsets
         # Note: This is more reliable than using AdminClient for offset fetching
+        brokers = list(self.admin.list_topics().brokers.values())
+        if brokers:
+            # BrokerMetadata has host and port attributes
+            broker = brokers[0]
+            bootstrap_server = f"{broker.host}:{broker.port}"
+        else:
+            bootstrap_server = "localhost:9092"
+
         consumer_config = {
-            "bootstrap.servers": list(self.admin.list_topics().brokers.values())[0][0]
-            if self.admin.list_topics().brokers
-            else "localhost:9092",
+            "bootstrap.servers": bootstrap_server,
             "group.id": group_id,
             "enable.auto.commit": False,
         }
