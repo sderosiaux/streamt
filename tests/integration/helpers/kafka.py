@@ -68,7 +68,7 @@ class KafkaHelper:
         """Produce messages to a topic."""
         for msg in messages:
             key = msg.get(key_field) if key_field else None
-            if key:
+            if key is not None:
                 key = str(key).encode("utf-8")
             value = json.dumps(msg).encode("utf-8")
             self.producer.produce(topic, value=value, key=key)

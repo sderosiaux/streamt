@@ -414,9 +414,10 @@ class KafkaDeployer:
         if not brokers:
             return 0
 
-        broker_host, broker_port = brokers[0]
+        # BrokerMetadata has host and port attributes
+        broker = brokers[0]
         consumer_config = {
-            "bootstrap.servers": f"{broker_host}:{broker_port}",
+            "bootstrap.servers": f"{broker.host}:{broker.port}",
             "group.id": "_streamt_internal_count",
             "enable.auto.commit": False,
         }

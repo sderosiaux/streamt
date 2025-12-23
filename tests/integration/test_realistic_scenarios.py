@@ -590,8 +590,8 @@ models:
             jobs = manifest.artifacts.get("flink_jobs", [])
             jobs_by_name = {j["name"]: j for j in jobs}
 
-            # Deploy stage_a first
-            for job_name in ["stage_a_processor", "stage_b_processor"]:
+            # Deploy stage_a first (job names match model names)
+            for job_name in ["stage_a", "stage_b"]:
                 if job_name in jobs_by_name:
                     job_dict = jobs_by_name[job_name]
                     job_artifact = FlinkJobArtifact(
@@ -758,8 +758,8 @@ models:
             jobs = manifest.artifacts.get("flink_jobs", [])
             jobs_by_name = {j["name"]: j for j in jobs}
 
-            # Deploy in topological order
-            for job_name in ["events_filtered_processor", "events_enriched_processor", "events_final_processor"]:
+            # Deploy in topological order (job names match model names)
+            for job_name in ["events_filtered", "events_enriched", "events_final"]:
                 if job_name in jobs_by_name:
                     job_dict = jobs_by_name[job_name]
                     job_artifact = FlinkJobArtifact(
