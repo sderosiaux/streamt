@@ -4,6 +4,7 @@ These tests validate that sqlglot can parse Flink-compatible SQL patterns
 and that type inference works correctly for various expressions.
 """
 
+import pytest
 import sqlglot
 from sqlglot import exp
 
@@ -308,6 +309,324 @@ class TestSqlglotFlinkCompatibility:
         assert group is not None
         # Should have 2 group by expressions
         assert len(group.expressions) == 2
+
+
+class TestAdvancedFlinkSQLPatterns:
+    """Battle-test sqlglot with complex real-world Flink SQL patterns.
+
+    These tests ensure our parser handles advanced patterns found in
+    production Flink deployments including temporal joins, interval joins,
+    MATCH_RECOGNIZE (CEP), LAG/LEAD window functions, and JSON functions.
+
+    Sources:
+    - https://nightlies.apache.org/flink/flink-docs-master/docs/dev/table/sql/queries/joins/
+    - https://nightlies.apache.org/flink/flink-docs-master/docs/dev/table/sql/queries/match_recognize/
+    - https://docs.confluent.io/cloud/current/flink/reference/functions/json-functions.html
+    """
+
+    @pytest.mark.xfail(reason="FOR SYSTEM_TIME AS OF is Flink-specific, not supported by sqlglot")
+    def test_temporal_join_for_system_time_as_of(self):
+        """Test temporal join with FOR SYSTEM_TIME AS OF (versioned table join)."""
+        sql = """SELECT
+            order_id,
+            price,
+            orders.currency,
+            conversion_rate,
+            order_time
+        FROM orders
+        LEFT JOIN currency_rates FOR SYSTEM_TIME AS OF orders.order_time
+        ON orders.currency = currency_rates.currency"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert isinstance(parsed, exp.Select)
+        assert len(parsed.expressions) == 5
+
+        # Check for temporal join structure
+        joins = list(parsed.find_all(exp.Join))
+        assert len(joins) == 1
+
+    @pytest.mark.xfail(reason="FOR SYSTEM_TIME AS OF is Flink-specific, not supported by sqlglot")
+    def test_lookup_join_with_proctime(self):
+        """Test lookup join using processing time."""
+        sql = """SELECT o.order_id, o.total, c.country, c.zip
+        FROM Orders AS o
+        JOIN Customers FOR SYSTEM_TIME AS OF o.proc_time AS c
+        ON o.customer_id = c.id"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert isinstance(parsed, exp.Select)
+        joins = list(parsed.find_all(exp.Join))
+        assert len(joins) == 1
+
+    def test_interval_join(self):
+        """Test interval join with BETWEEN time constraint."""
+        sql = """SELECT *
+        FROM Orders o, Shipments s
+        WHERE o.id = s.order_id
+        AND o.order_time BETWEEN s.ship_time - INTERVAL '4' HOUR AND s.ship_time"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert isinstance(parsed, exp.Select)
+        # Should have WHERE clause with BETWEEN
+        where = parsed.args.get("where")
+        assert where is not None
+
+    @pytest.mark.xfail(reason="MATCH_RECOGNIZE is Flink/SQL:2016 CEP syntax, not supported by sqlglot")
+    def test_match_recognize_basic_pattern(self):
+        """Test MATCH_RECOGNIZE for basic pattern matching (CEP)."""
+        sql = """SELECT T.aid, T.bid, T.cid
+        FROM MyTable
+        MATCH_RECOGNIZE (
+            PARTITION BY userid
+            ORDER BY proctime
+            MEASURES
+                A.id AS aid,
+                B.id AS bid,
+                C.id AS cid
+            PATTERN (A B C)
+            DEFINE
+                A AS name = 'a',
+                B AS name = 'b',
+                C AS name = 'c'
+        ) AS T"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert isinstance(parsed, exp.Select)
+        # MATCH_RECOGNIZE is parsed as a subquery or special construct
+        assert parsed is not None
+
+    @pytest.mark.xfail(reason="MATCH_RECOGNIZE is Flink/SQL:2016 CEP syntax, not supported by sqlglot")
+    def test_match_recognize_with_within_clause(self):
+        """Test MATCH_RECOGNIZE with WITHIN time constraint for price drop detection."""
+        sql = """SELECT *
+        FROM Ticker
+        MATCH_RECOGNIZE(
+            PARTITION BY symbol
+            ORDER BY rowtime
+            MEASURES
+                C.rowtime AS dropTime,
+                A.price - C.price AS dropDiff
+            ONE ROW PER MATCH
+            AFTER MATCH SKIP PAST LAST ROW
+            PATTERN (A B* C)
+            DEFINE
+                B AS B.price > A.price - 10,
+                C AS C.price < A.price - 10
+        )"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert isinstance(parsed, exp.Select)
+        assert parsed is not None
+
+    def test_lag_window_function(self):
+        """Test LAG() window function for accessing previous row values."""
+        sql = """SELECT
+            rowtime AS row_time,
+            player_id,
+            game_room_id,
+            points,
+            LAG(points, 1) OVER (PARTITION BY player_id ORDER BY rowtime) AS previous_points
+        FROM gaming_player_activity"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert len(parsed.expressions) == 5
+
+        # Find the LAG expression
+        lag_found = False
+        for expr in parsed.expressions:
+            if isinstance(expr, exp.Alias) and expr.alias == "previous_points":
+                inner = expr.this
+                # LAG is a Window function
+                assert isinstance(inner, exp.Window)
+                assert isinstance(inner.this, exp.Lag)
+                lag_found = True
+
+        assert lag_found, "LAG window function should be parsed"
+
+    def test_lead_window_function(self):
+        """Test LEAD() window function for accessing next row values."""
+        sql = """SELECT
+            event_id,
+            amount,
+            LEAD(amount, 1, 0) OVER (PARTITION BY user_id ORDER BY event_time) AS next_amount
+        FROM events"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert len(parsed.expressions) == 3
+
+        # Find the LEAD expression
+        for expr in parsed.expressions:
+            if isinstance(expr, exp.Alias) and expr.alias == "next_amount":
+                inner = expr.this
+                assert isinstance(inner, exp.Window)
+                assert isinstance(inner.this, exp.Lead)
+
+    def test_json_value_function(self):
+        """Test JSON_VALUE extraction from JSON strings."""
+        sql = """SELECT
+            event_id,
+            JSON_VALUE(payload, '$.user.name') AS user_name
+        FROM events"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert len(parsed.expressions) == 2
+
+        # JSON_VALUE is parsed as JSONExtract or Anonymous
+        for expr in parsed.expressions:
+            if isinstance(expr, exp.Alias) and expr.alias == "user_name":
+                inner = expr.this
+                # Could be JSONExtract, JSONExtractScalar, or Anonymous
+                assert inner is not None
+
+    def test_json_query_function(self):
+        """Test JSON_QUERY for extracting complex JSON structures."""
+        sql = """SELECT
+            JSON_QUERY('{ "a": { "b": 1 } }', '$.a') AS nested_obj
+        FROM events"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert len(parsed.expressions) == 1
+        assert parsed is not None
+
+    @pytest.mark.xfail(reason="CUMULATE TVF with TABLE keyword is Flink-specific syntax")
+    def test_cumulate_window_tvf(self):
+        """Test CUMULATE windowing table-valued function."""
+        sql = """SELECT
+            window_start,
+            window_end,
+            user_id,
+            SUM(amount) AS total
+        FROM TABLE(
+            CUMULATE(TABLE orders, DESCRIPTOR(order_time), INTERVAL '1' HOUR, INTERVAL '1' DAY)
+        )
+        GROUP BY window_start, window_end, user_id"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert isinstance(parsed, exp.Select)
+        # Should have GROUP BY
+        group = parsed.args.get("group")
+        assert group is not None
+
+    def test_multiple_window_aggregates(self):
+        """Test multiple window aggregates with different partitions."""
+        sql = """SELECT
+            order_id,
+            category,
+            amount,
+            SUM(amount) OVER (PARTITION BY category ORDER BY order_time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total,
+            AVG(amount) OVER (PARTITION BY category ORDER BY order_time ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) AS moving_avg,
+            RANK() OVER (PARTITION BY category ORDER BY amount DESC) AS amount_rank
+        FROM orders"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert len(parsed.expressions) == 6
+
+        # Count Window expressions
+        window_count = 0
+        for expr in parsed.expressions:
+            if isinstance(expr, exp.Alias):
+                if isinstance(expr.this, exp.Window):
+                    window_count += 1
+
+        assert window_count == 3, "Should have 3 window aggregates"
+
+    def test_complex_case_with_in_clause(self):
+        """Test CASE with IN clause and multiple conditions."""
+        sql = """SELECT
+            user_id,
+            CASE
+                WHEN status IN ('active', 'premium') AND region = 'US' THEN 'high_priority'
+                WHEN status IN ('trial', 'basic') AND days_active > 30 THEN 'convert_target'
+                WHEN status = 'churned' THEN 'win_back'
+                ELSE 'standard'
+            END AS segment
+        FROM users"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert len(parsed.expressions) == 2
+
+        case_expr = parsed.expressions[1]
+        assert isinstance(case_expr, exp.Alias)
+        assert isinstance(case_expr.this, exp.Case)
+
+        # Should have 3 WHEN clauses
+        ifs = case_expr.this.args.get("ifs", [])
+        assert len(ifs) == 3
+
+    def test_subquery_in_select(self):
+        """Test correlated subquery in SELECT clause."""
+        sql = """SELECT
+            o.order_id,
+            o.customer_id,
+            (SELECT MAX(amount) FROM orders o2 WHERE o2.customer_id = o.customer_id) AS max_order_amount
+        FROM orders o"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert len(parsed.expressions) == 3
+
+        # Third expression should be a subquery
+        subq_alias = parsed.expressions[2]
+        assert isinstance(subq_alias, exp.Alias)
+        assert isinstance(subq_alias.this, exp.Subquery)
+
+    def test_cte_with_recursive_pattern(self):
+        """Test Common Table Expression (WITH clause)."""
+        sql = """WITH ranked_orders AS (
+            SELECT
+                order_id,
+                customer_id,
+                amount,
+                ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY amount DESC) AS rn
+            FROM orders
+        )
+        SELECT order_id, customer_id, amount
+        FROM ranked_orders
+        WHERE rn = 1"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert isinstance(parsed, exp.Select)
+        # WITH is accessible via find - it's part of the tree structure
+        ctes = list(parsed.find_all(exp.CTE))
+        assert len(ctes) == 1
+
+    def test_union_all_streaming(self):
+        """Test UNION ALL for combining multiple streams."""
+        sql = """SELECT event_id, 'click' AS event_type, user_id, event_time
+        FROM click_events
+        UNION ALL
+        SELECT event_id, 'view' AS event_type, user_id, event_time
+        FROM view_events
+        UNION ALL
+        SELECT event_id, 'purchase' AS event_type, user_id, event_time
+        FROM purchase_events"""
+        parsed = sqlglot.parse_one(sql)
+
+        # Should be a Union expression
+        assert isinstance(parsed, exp.Union)
+
+    def test_lateral_table_function(self):
+        """Test LATERAL TABLE for table-generating functions."""
+        sql = """SELECT
+            user_id,
+            tag
+        FROM users,
+        LATERAL TABLE(SPLIT(tags, ',')) AS T(tag)"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert isinstance(parsed, exp.Select)
+        assert len(parsed.expressions) == 2
+
+    def test_distinct_on_streaming(self):
+        """Test SELECT DISTINCT for deduplication."""
+        sql = """SELECT DISTINCT
+            user_id,
+            FIRST_VALUE(event_type) OVER (PARTITION BY user_id ORDER BY event_time) AS first_event
+        FROM events"""
+        parsed = sqlglot.parse_one(sql)
+
+        assert isinstance(parsed, exp.Select)
+        # Check DISTINCT modifier
+        assert parsed.args.get("distinct") is not None
 
 
 class TestTypeInferenceFromSchema:
