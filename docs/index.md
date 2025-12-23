@@ -12,7 +12,7 @@ description: Build declarative streaming pipelines with Kafka, Flink, and Connec
 <span class="badge preview">Preview</span>
 
 [Get Started](getting-started/quickstart.md){ .md-button .md-button--primary }
-[View on GitHub](https://github.com/streamt/streamt){ .md-button }
+[View on GitHub](https://github.com/conduktor/streamt){ .md-button }
 
 </div>
 
@@ -251,9 +251,9 @@ pip install "streamt[all]"
 ## Community
 
 - [Slack](https://conduktor.io/slack) — Join the conversation, get help, share ideas
-- [GitHub Discussions](https://github.com/streamt/streamt/discussions) — Ask questions, share ideas
-- [GitHub Issues](https://github.com/streamt/streamt/issues) — Report bugs, request features
-- [Twitter](https://twitter.com/streamtdev) — Follow for updates
+- [GitHub Discussions](https://github.com/conduktor/streamt/discussions) — Ask questions, share ideas
+- [GitHub Issues](https://github.com/conduktor/streamt/issues) — Report bugs, request features
+- [X/Twitter](https://x.com/getconduktor) — Follow for updates
 
 ---
 

@@ -517,4 +517,4 @@ The following commands and options are planned:
 | `streamt diff` | Show diff between local and deployed | Planned |
 | `streamt init` | Initialize new project from template | Planned |
 
-See the [roadmap](https://github.com/streamt/streamt#roadmap) for the full list of planned features.
+See the [roadmap](https://github.com/conduktor/streamt#roadmap) for the full list of planned features.

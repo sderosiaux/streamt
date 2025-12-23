@@ -5,7 +5,7 @@
 **dbt for streaming** — Declarative streaming pipelines with Kafka, Flink, and Connect
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)]()
 [![Tests](https://img.shields.io/badge/tests-277%20passed-brightgreen.svg)]()
 [![CI](https://github.com/conduktor/streamt/actions/workflows/ci.yml/badge.svg)](https://github.com/conduktor/streamt/actions)
 [![Status](https://img.shields.io/badge/status-alpha-orange.svg)]()
@@ -315,6 +315,9 @@ tests:
 - [ ] Kubernetes Flink operator support — Native K8s deployment
 - [ ] CI/CD GitHub Actions templates — Automation for deploy pipelines
 - [ ] Curated connector library — Tested configs for Postgres, Snowflake, S3
+- [ ] CLI: `streamt init` — Initialize new project from template
+- [ ] CLI: `streamt diff` — Show diff between local and deployed state
+- [ ] CLI: `streamt rollback` — Rollback to previous deployment
 
 ### Vision
 
@@ -332,12 +335,12 @@ tests:
 
 ## License
 
-Apache 2.0 - See [LICENSE](LICENSE) for details.
+Apache 2.0
 
 ---
 
 <div align="center">
 
-**[Documentation](docs/)** • **[Examples](examples/)** • **[Local Development](LOCAL_DEVELOPMENT.md)** • **[Community](https://conduktor.io/slack)** • **[Contributing](CONTRIBUTING.md)**
+**[Documentation](docs/)** • **[Examples](examples/)** • **[Local Development](LOCAL_DEVELOPMENT.md)** • **[Community](https://conduktor.io/slack)**
 
 </div>

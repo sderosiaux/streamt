@@ -589,4 +589,4 @@ GROUP BY TUMBLE(order_time, INTERVAL '1' HOUR);
 - [ ] Confluent Cloud for Flink support
 - [ ] Changelog mode configuration (append, upsert, retract)
 
-See [GitHub Issues](https://github.com/streamt/streamt/issues) for the latest roadmap updates.
+See [GitHub Issues](https://github.com/conduktor/streamt/issues) for the latest roadmap updates.
