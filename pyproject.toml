@@ -55,8 +55,8 @@ docs = [
 streamt = "streamt.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/conduktor/streamt"
-Documentation = "https://github.com/conduktor/streamt"
+Homepage = "https://conduktor.github.io/streamt"
+Documentation = "https://conduktor.github.io/streamt"
 Repository = "https://github.com/conduktor/streamt"
 
 [tool.hatch.build.targets.wheel]

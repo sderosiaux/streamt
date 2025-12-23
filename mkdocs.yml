@@ -1,8 +1,8 @@
 site_name: streamt
 site_description: dbt for streaming - Declarative streaming pipelines with Kafka, Flink, and Connect
-site_url: https://sderosiaux.github.io/streamt
-repo_url: https://github.com/sderosiaux/streamt
-repo_name: sderosiaux/streamt
+site_url: https://conduktor.github.io/streamt
+repo_url: https://github.com/conduktor/streamt
+repo_name: conduktor/streamt
 
 theme:
   name: material
@@ -94,7 +94,7 @@ markdown_extensions:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/sderosiaux/streamt
+      link: https://github.com/conduktor/streamt
   generator: false
   analytics:
     provider: google
