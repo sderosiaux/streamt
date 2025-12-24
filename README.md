@@ -311,6 +311,7 @@ tests:
 
 ### Operational
 
+- [ ] Build artifacts — `streamt build` generates deployable artifacts for debugging, auditing, air-gapped deployments ([spec](docs/specs/build-artifacts.md))
 - [ ] Prometheus/OpenTelemetry integration — Metrics and alerting
 - [ ] Kubernetes Flink operator support — Native K8s deployment
 - [ ] CI/CD GitHub Actions templates — Automation for deploy pipelines
